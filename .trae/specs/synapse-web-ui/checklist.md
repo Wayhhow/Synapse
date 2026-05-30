@@ -1,0 +1,10 @@
+- [ ] `requirements.txt` 已添加 `fastapi` 和 `uvicorn`
+- [ ] `web/app.py` 已创建，FastAPI 应用运行正常
+- [ ] `POST /chat` 端点工作正常，返回 Agent 回复
+- [ ] `GET /skills` 端点返回技能列表
+- [ ] `POST /skills/{name}/execute` 端点能直接执行技能
+- [ ] 静态文件服务配置正确
+- [ ] `web/static/index.html` 聊天界面结构完整
+- [ ] `web/static/style.css` 样式美观
+- [ ] `web/static/app.js` 前端逻辑正常（发送、接收、显示技能标签）
+- [ ] 手动测试 Web UI 可以正常聊天

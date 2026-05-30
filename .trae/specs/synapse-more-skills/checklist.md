@@ -1,0 +1,11 @@
+- [ ] `skills/calculator_skill.py` 已创建，安全解析数学表达式
+- [ ] 计算器支持 `+ - * / ** ()` 运算
+- [ ] 计算器禁止危险操作（函数调用、属性访问等）
+- [ ] `skills/translation_skill.py` 已创建，调用真实翻译 API
+- [ ] 翻译技能处理 API 失败场景
+- [ ] `skills/stock_skill.py` 已创建，调用真实股票 API
+- [ ] 股票技能处理 API 失败场景
+- [ ] `skills/news_skill.py` 已创建，调用真实新闻 API
+- [ ] 新闻技能处理 API 失败场景
+- [ ] `skills/__init__.py` 导出所有新增技能
+- [ ] 全部测试通过，无回归

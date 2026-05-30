@@ -1,0 +1,13 @@
+- [ ] `core/skill_registry.py` 已创建，`SkillRegistry` 实现完整
+- [ ] 技能元数据能正确注册和持久化
+- [ ] 技能执行结果（成功/失败/时间/错误）被正确记录
+- [ ] `get_stats()` 返回准确的统计数据
+- [ ] `meta/skill_evaluator.py` 已创建，`SkillEvaluator` 实现完整
+- [ ] 成功率计算正确
+- [ ] 低质量技能（成功率 < 50%）被正确识别
+- [ ] 改进报告生成正确
+- [ ] `SkillRouter` 在技能执行后自动记录结果
+- [ ] `SkillCreator` 在生成前检查相似技能
+- [ ] 新技能生成后自动注册到 Registry
+- [ ] 低质量技能触发自动重新生成
+- [ ] 全部测试通过，无回归

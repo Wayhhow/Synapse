@@ -1,0 +1,12 @@
+- [ ] `core/memory.py` 已创建，`Memory` 类实现完整
+- [ ] `Memory.add_message()` 能按 `session_id` 存储消息
+- [ ] `Memory.get_history()` 能按 `session_id` 检索消息
+- [ ] `Memory.clear()` 能清空指定会话
+- [ ] `max_history` 超出时正确截断最早消息
+- [ ] `router/router.py` 的 `process_query` 支持 `session_id` 参数
+- [ ] 有 `session_id` 时，LLM messages 正确注入历史上下文
+- [ ] Agent 回复后自动将对话存入记忆
+- [ ] `cli.py` 生成唯一 `session_id` 并传递给 `process_query`
+- [ ] CLI 多轮对话测试通过
+- [ ] `tests/test_memory.py` 全部通过
+- [ ] `tests/test_skills_routing.py` 无回归
