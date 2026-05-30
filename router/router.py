@@ -114,6 +114,8 @@ class SkillRouter:
         """
         text_lower = text.lower()
         for skill in self.skills.values():
+            # Check if any word in the skill name or description is in the input text
+            # A very simple mock logic.
             skill_keywords = set(skill.name.lower().split('_') + skill.description.lower().split())
             text_words = set(text_lower.split())
             if skill_keywords.intersection(text_words):
