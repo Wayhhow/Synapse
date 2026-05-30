@@ -1,10 +1,13 @@
 import os
 import ast
 import json
+import logging
 from typing import Optional
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
+
+logger = logging.getLogger(__name__)
 
 class GeneratedSkill(BaseModel):
     filename: str = Field(..., description="The name of the python file, e.g., 'crypto_price_skill.py'")
@@ -62,15 +65,18 @@ class SkillCreator:
             try:
                 ast.parse(generated_skill.code)
             except SyntaxError as e:
-                print(f"SkillCreator: Generated code contains syntax errors: {e}")
+                logger.error(f"SkillCreator: Generated code contains syntax errors: {e}")
                 return False
 
             # Ensure the filename ends with .py
             if not generated_skill.filename.endswith(".py"):
                 generated_skill.filename += ".py"
 
-            # Ensure filename is safe (alphanumeric and underscores only to prevent path traversal)
-            safe_filename = "".join([c for c in generated_skill.filename if c.isalnum() or c == '_' or c == '.'])
+            # Filename safety validation
+            safe_filename = os.path.basename(generated_skill.filename)
+            if "/" in safe_filename or "\\" in safe_filename:
+                logger.error(f"SkillCreator: Rejected unsafe filename: {generated_skill.filename}")
+                return False
 
             filepath = os.path.join(self.skills_dir, safe_filename)
 
@@ -78,9 +84,9 @@ class SkillCreator:
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(generated_skill.code)
 
-            print(f"SkillCreator: Successfully created {safe_filename}")
+            logger.info(f"SkillCreator: Successfully created {safe_filename}")
             return True
 
         except Exception as e:
-            print(f"SkillCreator: Failed to generate skill: {e}")
+            logger.error(f"SkillCreator: Failed to generate skill: {e}")
             return False
