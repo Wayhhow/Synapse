@@ -6,6 +6,8 @@ from typing import Optional
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
+from core.skill_registry import SkillRegistry
+from meta.skill_evaluator import SkillEvaluator
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +82,34 @@ class SkillCreator:
 
             filepath = os.path.join(self.skills_dir, safe_filename)
 
+            # Ratchet mechanism: if file already exists, compare scores
+            old_score = None
+            file_existed = os.path.exists(filepath)
+            if file_existed:
+                registry = SkillRegistry()
+                evaluator = SkillEvaluator(registry)
+                old_skill_name = safe_filename.replace('.py', '')
+                old_score = evaluator.evaluate(old_skill_name)
+
             # Save the code to the file
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(generated_skill.code)
+
+            # Ratchet: if old file existed, check if new version is better
+            if file_existed and old_score is not None:
+                registry = SkillRegistry()
+                evaluator = SkillEvaluator(registry)
+                new_skill_name = safe_filename.replace('.py', '')
+                registry.register(new_skill_name, f"Auto-generated skill for: {intent}")
+                new_score = evaluator.evaluate(new_skill_name)
+                if new_score < old_score:
+                    logger.warning(f"SkillCreator: Ratchet check failed - new score ({new_score}) < old score ({old_score}). Reverting.")
+                    os.remove(filepath)
+                    return False
+
+            # Register the new skill in the registry
+            registry = SkillRegistry()
+            registry.register(safe_filename.replace('.py', ''), f"Auto-generated skill for: {intent}")
 
             logger.info(f"SkillCreator: Successfully created {safe_filename}")
             return True

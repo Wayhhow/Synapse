@@ -7,14 +7,22 @@ from skills.weather_skill import WeatherResponse
 @pytest.fixture
 def router():
     # Pass a dummy API key so the initialization doesn't fail if no .env exists
-    return SkillRouter(api_key="test-api-key")
+    r = SkillRouter(api_key="test-api-key")
+    # Disable sandbox for testing (mocks can't be pickled for multiprocessing)
+    r.sandbox = None
+    return r
 
 def test_auto_discovery(router):
     # Verify that the router successfully discovered the weather skill
     assert "weather_skill" in router.skills
 
-    # Verify the translation skill is no longer present since mock_skills was deleted
-    assert "translation_skill" not in router.skills
+    # Verify all 6 skills are discovered
+    assert "weather_skill" in router.skills
+    assert "web_search_skill" in router.skills
+    assert "data_analysis_skill" in router.skills
+    assert "calculator_skill" in router.skills
+    assert "translation_skill" in router.skills
+    assert "news_skill" in router.skills
 
 @pytest.mark.asyncio
 @patch("httpx.AsyncClient.get", new_callable=AsyncMock)
@@ -71,7 +79,7 @@ async def test_weather_skill_execution(mock_get, router):
     assert result2.temperature == 25.0
 
 def test_missing_skill(router):
-    skill = router.route("Do something completely unrelated like calculate gravity")
+    skill = router.route("Do something completely unrelated like juggling flamingos")
     assert skill is None
 
 @pytest.mark.asyncio

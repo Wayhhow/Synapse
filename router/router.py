@@ -4,12 +4,17 @@ import importlib
 import inspect
 import json
 import logging
+import time
 from typing import Dict, Optional, Type, Union, List, Any
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 from core.base import BaseSkill
+from core.memory import Memory
+from core.sandbox import Sandbox
+from core.skill_registry import SkillRegistry
 from meta.skill_creator import SkillCreator
+from meta.skill_evaluator import SkillEvaluator
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +38,18 @@ class SkillRouter:
 
         # Initialize Meta-Evolution Creator
         self.skill_creator = SkillCreator(skills_dir=self.skills_dir, api_key=self.api_key, model_name=self.model_name)
+
+        # Initialize Memory System
+        self.memory = Memory(max_history=10, persist_path="data/memory.json")
+
+        # Initialize Sandbox
+        self.sandbox = Sandbox(timeout=10)
+
+        # Initialize Skill Registry & Evaluator
+        self.registry = SkillRegistry()
+        self.evaluator = SkillEvaluator(self.registry)
+        for skill_name, skill in self.skills.items():
+            self.registry.register(skill_name, skill.description)
 
     def _discover_skills(self) -> None:
         """
@@ -113,7 +130,7 @@ class SkillRouter:
 
         return tools
 
-    async def process_query(self, user_query: str, is_retry: bool = False) -> Union[str, BaseModel]:
+    async def process_query(self, user_query: str, is_retry: bool = False, session_id: Optional[str] = None) -> Union[str, BaseModel]:
         """
         Uses an LLM to understand the user's intent and intelligently route to a skill.
         If a skill is triggered, executes it and returns its Pydantic response model.
@@ -127,8 +144,13 @@ class SkillRouter:
         """
         messages = [
             {"role": "system", "content": "You are Synapse, an intelligent routing agent. Use the provided tools to answer the user's query if applicable. If NO tool is suitable, you MUST call the `request_new_skill` tool. Only answer directly via plain text if it's a simple greeting or casual chat."},
-            {"role": "user", "content": user_query}
         ]
+
+        if session_id:
+            history = self.memory.get_history(session_id)
+            messages.extend(history)
+
+        messages.append({"role": "user", "content": user_query})
 
         tools = self._get_tools_schema()
 
@@ -176,15 +198,40 @@ class SkillRouter:
             if function_name in self.skills:
                 skill = self.skills[function_name]
 
-                # Execute the skill with the provided arguments
-                result = await skill.execute(**arguments)
+                start_time = time.time()
+                try:
+                    if skill.use_sandbox and self.sandbox is not None:
+                        result = self.sandbox.execute(skill, **arguments)
+                    else:
+                        result = await skill.execute(**arguments)
+                    execution_time = time.time() - start_time
+                    self.registry.record_execution(function_name, success=True, execution_time=execution_time)
+                except Exception as e:
+                    execution_time = time.time() - start_time
+                    self.registry.record_execution(function_name, success=False, execution_time=execution_time, error=str(e))
+                    logger.error(f"Skill '{function_name}' execution failed: {e}")
+
+                    if session_id:
+                        self.memory.add_message(session_id, "user", user_query)
+                        self.memory.add_message(session_id, "assistant", str(f"Error: Skill '{function_name}' execution failed: {e}"))
+
+                    return f"Error: Skill '{function_name}' execution failed: {e}"
+
+                if session_id:
+                    self.memory.add_message(session_id, "user", user_query)
+                    self.memory.add_message(session_id, "assistant", str(result))
+
                 return result
             else:
                 logger.error(f"Skill '{function_name}' was requested by LLM but not found in registered skills.")
                 return f"Error: Skill '{function_name}' was requested by LLM but not found in registered skills."
 
         # If no tool was called, return the plain text response
-        return message.content or ""
+        text_result = message.content or ""
+        if session_id:
+            self.memory.add_message(session_id, "user", user_query)
+            self.memory.add_message(session_id, "assistant", text_result)
+        return text_result
 
     def route(self, text: str) -> Optional[BaseSkill]:
         """

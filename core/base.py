@@ -39,6 +39,10 @@ class BaseSkill(ABC):
         """
         return self.expected_args(**kwargs)
 
+    @property
+    def use_sandbox(self) -> bool:
+        return True
+
     @abstractmethod
     async def execute(self, **kwargs) -> BaseModel:
         """
