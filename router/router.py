@@ -7,10 +7,12 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 from core.base import BaseSkill
+from meta.skill_creator import SkillCreator
 
 class SkillRouter:
     """
     SkillRouter dynamically discovers and loads skills, and routes input to the appropriate skill using an LLM.
+    Includes Meta-Evolution capabilities to write new skills if a required tool is missing.
     """
     def __init__(self, skills_dir: str = "skills", api_key: Optional[str] = None, model_name: str = "gpt-4o-mini"):
         load_dotenv()
@@ -22,6 +24,9 @@ class SkillRouter:
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.model_name = model_name
         self.client = AsyncOpenAI(api_key=self.api_key)
+
+        # Initialize Meta-Evolution Creator
+        self.skill_creator = SkillCreator(skills_dir=self.skills_dir, api_key=self.api_key, model_name=self.model_name)
 
     def _discover_skills(self) -> None:
         """
@@ -46,6 +51,7 @@ class SkillRouter:
     def _get_tools_schema(self) -> List[Dict[str, Any]]:
         """
         Dynamically generate OpenAI tool specifications from registered skills.
+        Includes a default meta-tool to request a new skill if needed.
         """
         tools = []
         for skill_name, skill in self.skills.items():
@@ -63,16 +69,41 @@ class SkillRouter:
                 }
             }
             tools.append(tool)
+
+        # Add the meta-tool for automatic evolution
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "request_new_skill",
+                "description": "Call this tool if NONE of the other tools can handle the user's request. This will trigger the agent to write a new Python skill dynamically.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "intent": {
+                            "type": "string",
+                            "description": "A clear, concise description of the new task or skill that is missing."
+                        },
+                        "requirements": {
+                            "type": "string",
+                            "description": "Any specific technical requirements, inputs, or expected outputs."
+                        }
+                    },
+                    "required": ["intent", "requirements"]
+                }
+            }
+        })
+
         return tools
 
-    async def process_query(self, user_query: str) -> Union[str, BaseModel]:
+    async def process_query(self, user_query: str, _is_retry: bool = False) -> Union[str, BaseModel]:
         """
         Uses an LLM to understand the user's intent and intelligently route to a skill.
         If a skill is triggered, executes it and returns its Pydantic response model.
+        If the meta-tool is triggered, dynamically generates the skill, reloads, and retries.
         If no skill is triggered, returns the plain text LLM response.
         """
         messages = [
-            {"role": "system", "content": "You are Synapse, an intelligent routing agent. Use the provided tools to answer the user's query if applicable. If no tool is suitable, answer the query directly."},
+            {"role": "system", "content": "You are Synapse, an intelligent routing agent. Use the provided tools to answer the user's query if applicable. If NO tool is suitable, you MUST call the `request_new_skill` tool. Only answer directly via plain text if it's a simple greeting or casual chat."},
             {"role": "user", "content": user_query}
         ]
 
@@ -93,10 +124,32 @@ class SkillRouter:
             # For simplicity, we process the first tool call in this iteration
             tool_call = message.tool_calls[0]
             function_name = tool_call.function.name
+            arguments = json.loads(tool_call.function.arguments)
 
+            # Meta-Evolution Intercept
+            if function_name == "request_new_skill":
+                if _is_retry:
+                    return "Error: Already attempted to generate a skill for this intent, but failed to execute it."
+
+                print(f"Meta-Evolution triggered for intent: {arguments.get('intent')}")
+
+                success = await self.skill_creator.generate_skill(
+                    intent=arguments.get("intent", user_query),
+                    requirements=arguments.get("requirements", "")
+                )
+
+                if success:
+                    # Dynamically reload skills
+                    self._discover_skills()
+                    # Retry the original query
+                    print("Skill generated successfully. Retrying original query...")
+                    return await self.process_query(user_query, _is_retry=True)
+                else:
+                    return "Error: Meta-Evolution failed to generate a valid skill."
+
+            # Standard Skill Routing
             if function_name in self.skills:
                 skill = self.skills[function_name]
-                arguments = json.loads(tool_call.function.arguments)
 
                 # Execute the skill with the provided arguments
                 result = await skill.execute(**arguments)

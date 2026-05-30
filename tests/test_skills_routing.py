@@ -74,6 +74,47 @@ async def test_process_query_tool_call(mock_create, router):
 
 @pytest.mark.asyncio
 @patch('openai.resources.chat.completions.AsyncCompletions.create', new_callable=AsyncMock)
+@patch('meta.skill_creator.SkillCreator.generate_skill', new_callable=AsyncMock)
+async def test_process_query_meta_evolution(mock_generate, mock_create, router):
+    # Setup LLM to first request a new skill, then on retry, route to the newly generated skill
+
+    # First call: LLM calls request_new_skill
+    mock_msg1 = MagicMock()
+    mock_tc1 = MagicMock()
+    mock_tc1.function.name = "request_new_skill"
+    mock_tc1.function.arguments = json.dumps({"intent": "Get stock price"})
+    mock_msg1.tool_calls = [mock_tc1]
+
+    # Second call (Retry): LLM calls the new skill
+    mock_msg2 = MagicMock()
+    mock_tc2 = MagicMock()
+    mock_tc2.function.name = "stock_skill" # Pretend it was created and loaded
+    mock_tc2.function.arguments = json.dumps({"symbol": "AAPL"})
+    mock_msg2.tool_calls = [mock_tc2]
+
+    mock_create.side_effect = [
+        MagicMock(choices=[MagicMock(message=mock_msg1)]),
+        MagicMock(choices=[MagicMock(message=mock_msg2)])
+    ]
+
+    # Mock the generator succeeding
+    mock_generate.return_value = True
+
+    # We need to mock the router's execution of the new skill since it doesn't really exist in the dict
+    with patch.dict(router.skills, {"stock_skill": MagicMock(execute=AsyncMock(return_value="AAPL is $150"))}):
+        result = await router.process_query("What is the stock price of AAPL?")
+
+        # Verify generate was called with correct intent
+        mock_generate.assert_called_once_with(intent="Get stock price", requirements="")
+
+        # Verify LLM was called twice (initial + retry)
+        assert mock_create.call_count == 2
+
+        # Verify final result is what the skill executed
+        assert result == "AAPL is $150"
+
+@pytest.mark.asyncio
+@patch('openai.resources.chat.completions.AsyncCompletions.create', new_callable=AsyncMock)
 async def test_process_query_text_response(mock_create, router):
     # Mock the LLM returning normal text (no tool call)
     mock_message = MagicMock()
