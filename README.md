@@ -341,8 +341,7 @@ Synapse/
 
 ## 致谢
 
-- **[darwin-skill](https://github.com/alchaincyf/darwin-skill)** — 9 维度评估体系和棘轮机制的灵感来源
-- **[nuwa-skill](https://github.com/alchaincyf/nuwa-skill)** — 多源采集和三重验证方法论
+- **[darwin-skill](https://github.com/alchaincyf/darwin-skill)** — 多维度评估体系和棘轮机制的设计灵感来源（借鉴概念，未使用代码）
 - **[SkillLens](https://arxiv.org/abs/2605.23899)** (Microsoft Research) — 实证 rubric 设计
 - **[SkillOpt](https://arxiv.org/abs/2605.23904)** (Microsoft Research) — validation-gated edits 框架
 - **[autoresearch](https://github.com/karpathy/autoresearch)** (Karpathy) — 自主实验循环的原始灵感
@@ -351,9 +350,7 @@ Synapse/
 
 <div align="center">
 
-**女娲造 Skill。达尔文让 Skill 进化。Synapse 让 Agent 自己学会。**
-
-*只保留改进，时间就站在你这边。*
+**Synapse — 当 Agent 遇到不会的事，它自己写代码学会。**
 
 **Author**: Wayhhow · **License**: MIT
 
