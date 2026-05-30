@@ -1,0 +1,8 @@
+- [x] `core/sandbox.py` 已创建，`Sandbox` 类实现完整
+- [x] 沙箱使用独立进程执行技能代码
+- [x] 超时控制正常工作（死循环技能被终止）
+- [x] 执行结果能正确通过 Queue 返回
+- [x] `BaseSkill` 添加了 `use_sandbox` 属性
+- [x] `SkillRouter` 根据 `use_sandbox` 决定执行方式
+- [x] 沙箱异常不影响主进程
+- [x] `tests/test_skills_routing.py` 无回归

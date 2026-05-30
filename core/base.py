@@ -32,6 +32,17 @@ class BaseSkill(ABC):
         """A Pydantic BaseModel class representing the expected response type for the execute method."""
         pass
 
+    def validate_args(self, **kwargs) -> BaseModel:
+        """
+        Validates the provided keyword arguments against the expected_args Pydantic model.
+        Returns an instantiated expected_args model populated with the provided kwargs.
+        """
+        return self.expected_args(**kwargs)
+
+    @property
+    def use_sandbox(self) -> bool:
+        return True
+
     @abstractmethod
     async def execute(self, **kwargs) -> BaseModel:
         """

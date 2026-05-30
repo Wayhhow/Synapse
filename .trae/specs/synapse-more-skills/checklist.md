@@ -1,0 +1,11 @@
+- [x] `skills/web_search_skill.py` 已创建，调用 DuckDuckGo API
+- [x] 搜索技能返回标题、摘要、链接
+- [x] 搜索技能处理 API 失败场景
+- [x] `skills/data_analysis_skill.py` 已创建，本地计算统计
+- [x] 分析技能返回均值、中位数、标准差等
+- [x] `skills/calculator_skill.py` 已创建，安全 AST 解析
+- [x] 计算器禁止危险操作
+- [x] `skills/translation_skill.py` 已创建，调用 MyMemory API
+- [x] `skills/news_skill.py` 已创建，解析 Google News RSS
+- [x] `skills/__init__.py` 导出所有新增技能
+- [x] 全部测试通过，无回归

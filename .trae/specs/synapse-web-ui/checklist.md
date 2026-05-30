@@ -1,0 +1,8 @@
+- [x] `requirements.txt` 已添加 `fastapi` 和 `uvicorn`
+- [x] `web/app.py` 已创建，FastAPI 应用运行正常
+- [x] `POST /chat` 端点工作正常
+- [x] `GET /skills` 端点返回技能列表
+- [x] 静态文件服务配置正确
+- [x] `web/static/index.html` 聊天界面结构完整
+- [x] `web/static/style.css` 样式美观
+- [x] `web/static/app.js` 前端逻辑正常

@@ -1,0 +1,10 @@
+- [x] `core/skill_registry.py` 已创建，`SkillRegistry` 实现完整
+- [x] 技能元数据能正确注册和持久化到 JSON
+- [x] 技能执行结果被正确记录
+- [x] `meta/skill_evaluator.py` 已创建，5 维度评估实现
+- [x] 评估分数 0-100 正确计算
+- [x] 低质量技能被正确识别
+- [x] `SkillRouter` 在技能执行后自动记录结果
+- [x] `SkillCreator` 在生成前检查相似技能
+- [x] 棘轮机制：新版本评分高于旧版本才替换
+- [x] 全部测试通过，无回归

@@ -1,0 +1,17 @@
+- [x] `router/router.py` 的 `_discover_skills()` 方法正确处理 `importlib` 缓存，新模块能加载、已存在模块能刷新
+- [x] `router/router.py` 中所有 `print` 已替换为 `logging`
+- [x] `router/router.py` 的 `process_query` 参数 `_is_retry` 已改为 `is_retry`
+- [x] `meta/skill_creator.py` 的文件名安全校验使用 `os.path.basename()` + 拒绝路径分隔符，保留连字符 `-`
+- [x] `meta/skill_creator.py` 中所有 `print` 已替换为 `logging`
+- [x] `core/base.py` 的 `BaseSkill` 添加了 `validate_args(self, **kwargs)` 方法
+- [x] `core/__init__.py` 导出 `BaseSkill`
+- [x] `router/__init__.py` 导出 `SkillRouter`
+- [x] `skills/__init__.py` 导出 `WeatherSkill`
+- [x] `meta/__init__.py` 导出 `SkillCreator`
+- [x] `skills/weather_skill.py` 调用真实的 Open-Meteo API，不再是 Mock 数据
+- [x] `skills/weather_skill.py` 在 API 失败时返回友好的错误信息
+- [x] `.env.example` 已创建，包含 `OPENAI_API_KEY` 示例
+- [x] `cli.py` 已创建，支持交互式命令行循环
+- [x] `tests/test_skills_routing.py` 所有测试通过
+- [x] `tests/test_meta_evolution.py` 所有测试通过
+- [x] 运行 `pytest` 全部测试通过，无回归

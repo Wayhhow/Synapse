@@ -1,23 +1,34 @@
 import os
+import sys
 import importlib
 import inspect
 import json
+import logging
+import time
 from typing import Dict, Optional, Type, Union, List, Any
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 from core.base import BaseSkill
+from core.memory import Memory
+from core.sandbox import Sandbox
+from core.skill_registry import SkillRegistry
 from meta.skill_creator import SkillCreator
+from meta.skill_evaluator import SkillEvaluator
+
+logger = logging.getLogger(__name__)
 
 class SkillRouter:
     """
     SkillRouter dynamically discovers and loads skills, and routes input to the appropriate skill using an LLM.
     Includes Meta-Evolution capabilities to write new skills if a required tool is missing.
     """
+
     def __init__(self, skills_dir: str = "skills", api_key: Optional[str] = None, model_name: str = "gpt-4o-mini"):
         load_dotenv()
         self.skills_dir = skills_dir
         self.skills: Dict[str, BaseSkill] = {}
+        self._loaded_modules: Dict[str, Any] = {}
         self._discover_skills()
 
         # Initialize OpenAI Client
@@ -28,9 +39,22 @@ class SkillRouter:
         # Initialize Meta-Evolution Creator
         self.skill_creator = SkillCreator(skills_dir=self.skills_dir, api_key=self.api_key, model_name=self.model_name)
 
+        # Initialize Memory System
+        self.memory = Memory(max_history=10, persist_path="data/memory.json")
+
+        # Initialize Sandbox
+        self.sandbox = Sandbox(timeout=10)
+
+        # Initialize Skill Registry & Evaluator
+        self.registry = SkillRegistry()
+        self.evaluator = SkillEvaluator(self.registry)
+        for skill_name, skill in self.skills.items():
+            self.registry.register(skill_name, skill.description)
+
     def _discover_skills(self) -> None:
         """
         Dynamically scans the skills directory and loads all subclasses of BaseSkill.
+        Handles importlib cache correctly: reloads existing modules and imports new ones.
         """
         if not os.path.isdir(self.skills_dir):
             return
@@ -39,14 +63,25 @@ class SkillRouter:
             if filename.endswith(".py") and filename != "__init__.py":
                 module_name = f"{self.skills_dir}.{filename[:-3]}"
                 try:
-                    module = importlib.import_module(module_name)
+                    if module_name in self._loaded_modules:
+                        # Previously loaded by SkillRouter; reload to refresh
+                        module = importlib.reload(sys.modules[module_name])
+                        logger.info(f"Reloaded module {module_name}")
+                    elif module_name in sys.modules:
+                        # Already in sys.modules but not tracked by SkillRouter yet; use as-is
+                        module = sys.modules[module_name]
+                        logger.info(f"Using existing module {module_name}")
+                    else:
+                        module = importlib.import_module(module_name)
+                        logger.info(f"Imported module {module_name}")
+                    self._loaded_modules[module_name] = module
                     for name, obj in inspect.getmembers(module):
                         if inspect.isclass(obj) and issubclass(obj, BaseSkill) and obj is not BaseSkill:
                             # Instantiate the skill
                             skill_instance = obj()
                             self.skills[skill_instance.name] = skill_instance
                 except Exception as e:
-                    print(f"Error loading module {module_name}: {e}")
+                    logger.error(f"Error loading module {module_name}: {e}")
 
     def _get_tools_schema(self) -> List[Dict[str, Any]]:
         """
@@ -95,17 +130,27 @@ class SkillRouter:
 
         return tools
 
-    async def process_query(self, user_query: str, _is_retry: bool = False) -> Union[str, BaseModel]:
+    async def process_query(self, user_query: str, is_retry: bool = False, session_id: Optional[str] = None) -> Union[str, BaseModel]:
         """
         Uses an LLM to understand the user's intent and intelligently route to a skill.
         If a skill is triggered, executes it and returns its Pydantic response model.
         If the meta-tool is triggered, dynamically generates the skill, reloads, and retries.
         If no skill is triggered, returns the plain text LLM response.
+
+        Args:
+            user_query: The user's natural language query.
+            is_retry: Whether this call is a retry after meta-evolution generated a new skill.
+                      Prevents infinite loops if skill generation succeeds but routing still fails.
         """
         messages = [
             {"role": "system", "content": "You are Synapse, an intelligent routing agent. Use the provided tools to answer the user's query if applicable. If NO tool is suitable, you MUST call the `request_new_skill` tool. Only answer directly via plain text if it's a simple greeting or casual chat."},
-            {"role": "user", "content": user_query}
         ]
+
+        if session_id:
+            history = self.memory.get_history(session_id)
+            messages.extend(history)
+
+        messages.append({"role": "user", "content": user_query})
 
         tools = self._get_tools_schema()
 
@@ -128,10 +173,11 @@ class SkillRouter:
 
             # Meta-Evolution Intercept
             if function_name == "request_new_skill":
-                if _is_retry:
+                if is_retry:
+                    logger.warning("Meta-Evolution retry failed: already attempted to generate a skill for this intent.")
                     return "Error: Already attempted to generate a skill for this intent, but failed to execute it."
 
-                print(f"Meta-Evolution triggered for intent: {arguments.get('intent')}")
+                logger.info(f"Meta-Evolution triggered for intent: {arguments.get('intent')}")
 
                 success = await self.skill_creator.generate_skill(
                     intent=arguments.get("intent", user_query),
@@ -142,23 +188,50 @@ class SkillRouter:
                     # Dynamically reload skills
                     self._discover_skills()
                     # Retry the original query
-                    print("Skill generated successfully. Retrying original query...")
-                    return await self.process_query(user_query, _is_retry=True)
+                    logger.info("Skill generated successfully. Retrying original query...")
+                    return await self.process_query(user_query, is_retry=True)
                 else:
+                    logger.error("Meta-Evolution failed to generate a valid skill.")
                     return "Error: Meta-Evolution failed to generate a valid skill."
 
             # Standard Skill Routing
             if function_name in self.skills:
                 skill = self.skills[function_name]
 
-                # Execute the skill with the provided arguments
-                result = await skill.execute(**arguments)
+                start_time = time.time()
+                try:
+                    if skill.use_sandbox and self.sandbox is not None:
+                        result = self.sandbox.execute(skill, **arguments)
+                    else:
+                        result = await skill.execute(**arguments)
+                    execution_time = time.time() - start_time
+                    self.registry.record_execution(function_name, success=True, execution_time=execution_time)
+                except Exception as e:
+                    execution_time = time.time() - start_time
+                    self.registry.record_execution(function_name, success=False, execution_time=execution_time, error=str(e))
+                    logger.error(f"Skill '{function_name}' execution failed: {e}")
+
+                    if session_id:
+                        self.memory.add_message(session_id, "user", user_query)
+                        self.memory.add_message(session_id, "assistant", str(f"Error: Skill '{function_name}' execution failed: {e}"))
+
+                    return f"Error: Skill '{function_name}' execution failed: {e}"
+
+                if session_id:
+                    self.memory.add_message(session_id, "user", user_query)
+                    self.memory.add_message(session_id, "assistant", str(result))
+
                 return result
             else:
+                logger.error(f"Skill '{function_name}' was requested by LLM but not found in registered skills.")
                 return f"Error: Skill '{function_name}' was requested by LLM but not found in registered skills."
 
         # If no tool was called, return the plain text response
-        return message.content or ""
+        text_result = message.content or ""
+        if session_id:
+            self.memory.add_message(session_id, "user", user_query)
+            self.memory.add_message(session_id, "assistant", text_result)
+        return text_result
 
     def route(self, text: str) -> Optional[BaseSkill]:
         """
