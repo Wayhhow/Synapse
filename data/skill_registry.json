@@ -42,11 +42,11 @@
   "weather_skill": {
     "description": "Get the current weather for a specific location and optional date.",
     "created_at": "2026-05-30T08:25:12.566362",
-    "total_count": 10,
-    "success_count": 9,
+    "total_count": 13,
+    "success_count": 12,
     "failure_count": 1,
     "last_error": "asyncio.run() cannot be called from a running event loop",
-    "avg_execution_time": 0.28323917388916015,
+    "avg_execution_time": 0.2298927123729999,
     "health_score": 100.0
   },
   "translation_skill": {
@@ -72,16 +72,26 @@
   "stock_skill": {
     "description": "",
     "created_at": "2026-05-30T08:25:15.857360",
-    "total_count": 10,
-    "success_count": 8,
+    "total_count": 13,
+    "success_count": 11,
     "failure_count": 2,
     "last_error": "asyncio.run() cannot be called from a running event loop",
-    "avg_execution_time": 0.00036625862121582027,
+    "avg_execution_time": 0.0003487330216627854,
     "health_score": 100.0
   },
   "math": {
     "description": "Auto-generated skill for: Add two numbers",
     "created_at": "2026-06-29T10:30:46.312457",
+    "total_count": 0,
+    "success_count": 0,
+    "failure_count": 0,
+    "last_error": null,
+    "avg_execution_time": 0.0,
+    "health_score": 100.0
+  },
+  "ratchet_skill": {
+    "description": "Auto-generated skill for: ratchet test",
+    "created_at": "2026-06-29T12:53:47.782476",
     "total_count": 0,
     "success_count": 0,
     "failure_count": 0,

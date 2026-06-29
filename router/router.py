@@ -245,11 +245,15 @@ class SkillRouter:
         Kept for backward compatibility during tests.
         """
         text_lower = text.lower()
+        # Ignore short tokens (<=3 chars) like "the", "is", "in", "up" — they are
+        # stopwords that cause false matches across skills. Kept logic simple but
+        # robust enough for the deprecated mock router.
+        text_words = {w for w in text_lower.split() if len(w) > 3}
         for skill in self.skills.values():
             # Check if any word in the skill name or description is in the input text
             # A very simple mock logic.
             skill_keywords = set(skill.name.lower().split('_') + skill.description.lower().split())
-            text_words = set(text_lower.split())
+            skill_keywords = {w for w in skill_keywords if len(w) > 3}
             if skill_keywords.intersection(text_words):
                 return skill
         return None
