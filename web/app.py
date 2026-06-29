@@ -5,7 +5,7 @@ from typing import Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel as PydanticModel
 from dotenv import load_dotenv
 from router.router import SkillRouter
@@ -17,6 +17,7 @@ router_instance: Optional[SkillRouter] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global router_instance
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     load_dotenv()
     router_instance = SkillRouter()
     logger.info("SkillRouter initialized")
@@ -40,9 +41,9 @@ async def chat(request: ChatRequest):
     session_id = request.session_id or str(uuid.uuid4())
     try:
         result = await router_instance.process_query(request.message, session_id=session_id)
-        if hasattr(result, 'model_dump'):
+        if isinstance(result, PydanticModel):
             reply = str(result.model_dump())
-            skill_used = getattr(result, '__class__', None).__name__ if result else None
+            skill_used = type(result).__name__
         else:
             reply = str(result)
             skill_used = None
@@ -59,6 +60,24 @@ async def list_skills():
         {"name": skill.name, "description": skill.description}
         for skill in router_instance.skills.values()
     ]
+
+@app.get("/health")
+async def health():
+    if router_instance is None:
+        return JSONResponse(status_code=503, content={"status": "initializing"})
+    return {"status": "ok", "skills_count": len(router_instance.skills)}
+
+@app.get("/stats")
+async def stats():
+    if router_instance is None:
+        raise HTTPException(status_code=503, detail="Router not initialized")
+    return router_instance.evaluator.generate_improvement_report()
+
+@app.get("/history/{session_id}")
+async def history(session_id: str):
+    if router_instance is None:
+        raise HTTPException(status_code=503, detail="Router not initialized")
+    return router_instance.memory.get_history(session_id)
 
 @app.get("/")
 async def index():

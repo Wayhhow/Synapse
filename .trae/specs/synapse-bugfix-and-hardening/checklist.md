@@ -1,0 +1,23 @@
+- [ ] `core/sandbox.py` 失败时返回带 error 的可识别结果,而非空 `BaseModel()`
+- [ ] `router/router.py` 能识别沙箱失败并记录 `success=False`,返回错误信息给用户
+- [ ] `meta/skill_evaluator.py` 的「结构质量」维度通过 AST 检查代码完整性,非硬编码
+- [ ] `meta/skill_evaluator.py` 的「反模式」维度扫描危险调用,非硬编码
+- [ ] `meta/skill_creator.py` 用真实 `skill.name` 注册,与 `SkillRouter` 一致
+- [ ] `meta/skill_creator.py` 棘轮机制基于新旧代码评估对比,新版本低分时回滚旧文件
+- [ ] `router/router.py` meta-evolution retry 透传 `session_id`
+- [ ] `web/app.py` 的 `skill_used` 仅对 Pydantic BaseModel 实例返回类名,文本响应返回 `None`
+- [ ] `skills/translation_skill.py` 的 query 经过 `urllib.parse.quote` 编码
+- [ ] `skills/news_skill.py` 的 query 经过 `urllib.parse.quote` 编码
+- [ ] `cli.py` 配置 `logging.basicConfig`,运行时能看到 INFO 日志
+- [ ] `web/app.py` 配置 `logging.basicConfig`,启动时能看到 INFO 日志
+- [ ] `web/app.py` 提供 `GET /health` 返回状态和技能数
+- [ ] `web/app.py` 提供 `GET /stats` 返回技能健康度报告
+- [ ] `web/app.py` 提供 `GET /history/{session_id}` 返回会话历史
+- [ ] `cli.py` 支持 `python cli.py --skills` 列出技能后退出
+- [ ] 新增 `tests/test_sandbox.py` 覆盖超时/异常/成功
+- [ ] 新增 `tests/test_skill_evaluator.py` 覆盖结构/反模式维度
+- [ ] 新增 `tests/test_web_app.py` 覆盖 /chat、/health、/stats、/history
+- [ ] 新增 `tests/test_skills_url_encoding.py` 覆盖特殊字符 query
+- [ ] `tests/test_meta_evolution.py` 包含棘轮回滚场景
+- [ ] `tests/test_skills_routing.py` 的 meta-evolution 测试验证 session_id 透传
+- [ ] 运行 `pytest tests/ -v` 全部通过,无回归

@@ -1,5 +1,6 @@
 import xml.etree.ElementTree as ET
 import httpx
+from urllib.parse import quote
 from pydantic import BaseModel, Field
 from typing import Type, Optional
 from core.base import BaseSkill
@@ -37,7 +38,7 @@ class NewsSkill(BaseSkill):
         try:
             url = (
                 f"https://news.google.com/rss/search"
-                f"?q={args.query}&hl=en-US&gl=US&ceid=US:en"
+                f"?q={quote(args.query)}&hl=en-US&gl=US&ceid=US:en"
             )
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.get(url)

@@ -11,7 +11,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel
 from core.base import BaseSkill
 from core.memory import Memory
-from core.sandbox import Sandbox
+from core.sandbox import Sandbox, SandboxResult
 from core.skill_registry import SkillRegistry
 from meta.skill_creator import SkillCreator
 from meta.skill_evaluator import SkillEvaluator
@@ -187,9 +187,12 @@ class SkillRouter:
                 if success:
                     # Dynamically reload skills
                     self._discover_skills()
+                    # Record the user's original query before retrying
+                    if session_id:
+                        self.memory.add_message(session_id, "user", user_query)
                     # Retry the original query
                     logger.info("Skill generated successfully. Retrying original query...")
-                    return await self.process_query(user_query, is_retry=True)
+                    return await self.process_query(user_query, is_retry=True, session_id=session_id)
                 else:
                     logger.error("Meta-Evolution failed to generate a valid skill.")
                     return "Error: Meta-Evolution failed to generate a valid skill."
@@ -201,7 +204,10 @@ class SkillRouter:
                 start_time = time.time()
                 try:
                     if skill.use_sandbox and self.sandbox is not None:
-                        result = self.sandbox.execute(skill, **arguments)
+                        sandbox_result: SandboxResult = self.sandbox.execute(skill, **arguments)
+                        if not sandbox_result.success:
+                            raise RuntimeError(sandbox_result.error or "Sandbox execution failed")
+                        result = sandbox_result.result
                     else:
                         result = await skill.execute(**arguments)
                     execution_time = time.time() - start_time

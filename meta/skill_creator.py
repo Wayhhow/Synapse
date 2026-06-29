@@ -2,11 +2,14 @@ import os
 import ast
 import json
 import logging
+import importlib.util
+import inspect
 from typing import Optional
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from core.skill_registry import SkillRegistry
+from core.base import BaseSkill
 from meta.skill_evaluator import SkillEvaluator
 
 logger = logging.getLogger(__name__)
@@ -20,12 +23,21 @@ class SkillCreator:
     """
     SkillCreator is the Meta-Evolution Module responsible for writing and saving new skills using an LLM.
     """
-    def __init__(self, skills_dir: str = "skills", api_key: Optional[str] = None, model_name: str = "gpt-4o-mini"):
+
+    def __init__(
+        self,
+        skills_dir: str = "skills",
+        api_key: Optional[str] = None,
+        model_name: str = "gpt-4o-mini",
+        registry: Optional[SkillRegistry] = None,
+    ):
         load_dotenv()
         self.skills_dir = skills_dir
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.model_name = model_name
         self.client = AsyncOpenAI(api_key=self.api_key)
+        self.registry = registry if registry is not None else SkillRegistry()
+        self.evaluator = SkillEvaluator(registry=self.registry, skills_dir=self.skills_dir)
 
     async def generate_skill(self, intent: str, requirements: str = "") -> bool:
         """
@@ -82,38 +94,93 @@ class SkillCreator:
 
             filepath = os.path.join(self.skills_dir, safe_filename)
 
-            # Ratchet mechanism: if file already exists, compare scores
-            old_score = None
+            # Ratchet mechanism: capture old content before overwriting
             file_existed = os.path.exists(filepath)
+            old_code = ""
             if file_existed:
-                registry = SkillRegistry()
-                evaluator = SkillEvaluator(registry)
-                old_skill_name = safe_filename.replace('.py', '')
-                old_score = evaluator.evaluate(old_skill_name)
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        old_code = f.read()
+                except OSError as e:
+                    logger.warning(f"SkillCreator: failed to read previous skill file {filepath}: {e}")
+                    old_code = ""
 
-            # Save the code to the file
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(generated_skill.code)
+            # Write the new code to the file
+            try:
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(generated_skill.code)
+            except OSError as e:
+                logger.error(f"SkillCreator: failed to write skill file {filepath}: {e}")
+                return False
 
-            # Ratchet: if old file existed, check if new version is better
-            if file_existed and old_score is not None:
-                registry = SkillRegistry()
-                evaluator = SkillEvaluator(registry)
-                new_skill_name = safe_filename.replace('.py', '')
-                registry.register(new_skill_name, f"Auto-generated skill for: {intent}")
-                new_score = evaluator.evaluate(new_skill_name)
-                if new_score < old_score:
-                    logger.warning(f"SkillCreator: Ratchet check failed - new score ({new_score}) < old score ({old_score}). Reverting.")
-                    os.remove(filepath)
-                    return False
+            # Load the new module and instantiate the BaseSkill subclass to get the real skill name
+            real_skill_name = self._load_skill_name(filepath, safe_filename)
+            if real_skill_name is None:
+                # Load failed: roll back to the previous content
+                logger.warning(f"SkillCreator: failed to load generated skill from {filepath}; rolling back.")
+                self._restore_file(filepath, file_existed, old_code)
+                return False
 
-            # Register the new skill in the registry
-            registry = SkillRegistry()
-            registry.register(safe_filename.replace('.py', ''), f"Auto-generated skill for: {intent}")
+            # Register the new skill under its real name
+            self.registry.register(real_skill_name, f"Auto-generated skill for: {intent}")
 
-            logger.info(f"SkillCreator: Successfully created {safe_filename}")
+            # Ratchet: only keep the new version if its code quality is not worse than the old one
+            new_score = self.evaluator.evaluate_code_quality(generated_skill.code)
+            old_score = self.evaluator.evaluate_code_quality(old_code) if old_code else 0.0
+            if new_score < old_score:
+                logger.warning(
+                    f"SkillCreator: Ratchet check failed - new score ({new_score}) < old score ({old_score}). "
+                    f"Rolling back {safe_filename}."
+                )
+                self._restore_file(filepath, file_existed, old_code)
+                return False
+
+            logger.info(f"SkillCreator: Successfully created {safe_filename} (skill name: {real_skill_name})")
             return True
 
         except Exception as e:
             logger.error(f"SkillCreator: Failed to generate skill: {e}")
             return False
+
+    @staticmethod
+    def _load_skill_name(filepath: str, safe_filename: str) -> Optional[str]:
+        """Load the module at filepath, instantiate the first BaseSkill subclass, return its `name`."""
+        module_name = f"_generated_{safe_filename[:-3]}"
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, filepath)
+            if spec is None or spec.loader is None:
+                logger.error(f"SkillCreator: could not create import spec for {filepath}")
+                return None
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except Exception as e:
+            logger.error(f"SkillCreator: failed to load generated module {filepath}: {e}")
+            return None
+
+        try:
+            for _, obj in inspect.getmembers(module, inspect.isclass):
+                if obj is BaseSkill or not issubclass(obj, BaseSkill):
+                    continue
+                # Skip classes that were merely imported into the module
+                if obj.__module__ != module.__name__:
+                    continue
+                skill_instance = obj()
+                return skill_instance.name
+        except Exception as e:
+            logger.error(f"SkillCreator: failed to instantiate BaseSkill subclass from {filepath}: {e}")
+            return None
+
+        logger.error(f"SkillCreator: no BaseSkill subclass defined in {filepath}")
+        return None
+
+    @staticmethod
+    def _restore_file(filepath: str, file_existed: bool, old_code: str) -> None:
+        """Restore the previous file content, or remove the file if it did not exist before."""
+        try:
+            if file_existed:
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(old_code)
+            elif os.path.exists(filepath):
+                os.remove(filepath)
+        except OSError as e:
+            logger.error(f"SkillCreator: failed to restore file {filepath}: {e}")

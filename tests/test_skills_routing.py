@@ -2,6 +2,7 @@ import pytest
 import json
 from unittest.mock import patch, MagicMock, AsyncMock
 from router.router import SkillRouter
+from core.memory import Memory
 from skills.weather_skill import WeatherResponse
 
 @pytest.fixture
@@ -10,6 +11,8 @@ def router():
     r = SkillRouter(api_key="test-api-key")
     # Disable sandbox for testing (mocks can't be pickled for multiprocessing)
     r.sandbox = None
+    # Use an in-memory Memory (no persist_path) for test isolation
+    r.memory = Memory(max_history=10)
     return r
 
 def test_auto_discovery(router):
@@ -162,7 +165,7 @@ async def test_process_query_meta_evolution(mock_generate, mock_create, router):
 
     # We need to mock the router's execution of the new skill since it doesn't really exist in the dict
     with patch.dict(router.skills, {"stock_skill": MagicMock(execute=AsyncMock(return_value="AAPL is $150"))}):
-        result = await router.process_query("What is the stock price of AAPL?")
+        result = await router.process_query("What is the stock price of AAPL?", session_id="test-session-123")
 
         # Verify generate was called with correct intent
         mock_generate.assert_called_once_with(intent="Get stock price", requirements="")
@@ -172,6 +175,11 @@ async def test_process_query_meta_evolution(mock_generate, mock_create, router):
 
         # Verify final result is what the skill executed
         assert result == "AAPL is $150"
+
+        # Verify both the original request and the retry request were recorded as user messages
+        history = router.memory.get_history("test-session-123")
+        user_messages = [m for m in history if m["role"] == "user"]
+        assert len(user_messages) == 2
 
 @pytest.mark.asyncio
 @patch('openai.resources.chat.completions.AsyncCompletions.create', new_callable=AsyncMock)
