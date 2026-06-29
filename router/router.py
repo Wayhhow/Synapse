@@ -11,7 +11,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel
 from core.base import BaseSkill
 from core.memory import Memory
-from core.sandbox import Sandbox
+from core.sandbox import Sandbox, SandboxResult
 from core.skill_registry import SkillRegistry
 from meta.skill_creator import SkillCreator
 from meta.skill_evaluator import SkillEvaluator
@@ -24,7 +24,8 @@ class SkillRouter:
     Includes Meta-Evolution capabilities to write new skills if a required tool is missing.
     """
 
-    def __init__(self, skills_dir: str = "skills", api_key: Optional[str] = None, model_name: str = "gpt-4o-mini"):
+    def __init__(self, skills_dir: str = "skills", api_key: Optional[str] = None, model_name: str = "gpt-4o-mini",
+                 registry: Optional["SkillRegistry"] = None, memory: Optional["Memory"] = None):
         load_dotenv()
         self.skills_dir = skills_dir
         self.skills: Dict[str, BaseSkill] = {}
@@ -36,18 +37,24 @@ class SkillRouter:
         self.model_name = model_name
         self.client = AsyncOpenAI(api_key=self.api_key)
 
-        # Initialize Meta-Evolution Creator
-        self.skill_creator = SkillCreator(skills_dir=self.skills_dir, api_key=self.api_key, model_name=self.model_name)
+        # Initialize Skill Registry & Evaluator (allow injection for test isolation)
+        self.registry = registry if registry is not None else SkillRegistry()
 
-        # Initialize Memory System
-        self.memory = Memory(max_history=10, persist_path="data/memory.json")
+        # Initialize Meta-Evolution Creator (share the same registry so generated
+        # skills and execution stats land in the same place)
+        self.skill_creator = SkillCreator(
+            skills_dir=self.skills_dir, api_key=self.api_key, model_name=self.model_name,
+            registry=self.registry,
+        )
+
+        # Initialize Memory System (allow injection for test isolation)
+        self.memory = memory if memory is not None else Memory(max_history=10, persist_path="data/memory.json")
 
         # Initialize Sandbox
         self.sandbox = Sandbox(timeout=10)
 
-        # Initialize Skill Registry & Evaluator
-        self.registry = SkillRegistry()
-        self.evaluator = SkillEvaluator(self.registry)
+        # Initialize Evaluator (after registry is set)
+        self.evaluator = SkillEvaluator(self.registry, skills_dir=self.skills_dir)
         for skill_name, skill in self.skills.items():
             self.registry.register(skill_name, skill.description)
 
@@ -187,9 +194,12 @@ class SkillRouter:
                 if success:
                     # Dynamically reload skills
                     self._discover_skills()
+                    # Record the user's original query before retrying
+                    if session_id:
+                        self.memory.add_message(session_id, "user", user_query)
                     # Retry the original query
                     logger.info("Skill generated successfully. Retrying original query...")
-                    return await self.process_query(user_query, is_retry=True)
+                    return await self.process_query(user_query, is_retry=True, session_id=session_id)
                 else:
                     logger.error("Meta-Evolution failed to generate a valid skill.")
                     return "Error: Meta-Evolution failed to generate a valid skill."
@@ -201,7 +211,10 @@ class SkillRouter:
                 start_time = time.time()
                 try:
                     if skill.use_sandbox and self.sandbox is not None:
-                        result = self.sandbox.execute(skill, **arguments)
+                        sandbox_result: SandboxResult = self.sandbox.execute(skill, **arguments)
+                        if not sandbox_result.success:
+                            raise RuntimeError(sandbox_result.error or "Sandbox execution failed")
+                        result = sandbox_result.result
                     else:
                         result = await skill.execute(**arguments)
                     execution_time = time.time() - start_time
@@ -239,11 +252,15 @@ class SkillRouter:
         Kept for backward compatibility during tests.
         """
         text_lower = text.lower()
+        # Ignore short tokens (<=3 chars) like "the", "is", "in", "up" — they are
+        # stopwords that cause false matches across skills. Kept logic simple but
+        # robust enough for the deprecated mock router.
+        text_words = {w for w in text_lower.split() if len(w) > 3}
         for skill in self.skills.values():
             # Check if any word in the skill name or description is in the input text
             # A very simple mock logic.
             skill_keywords = set(skill.name.lower().split('_') + skill.description.lower().split())
-            text_words = set(text_lower.split())
+            skill_keywords = {w for w in skill_keywords if len(w) > 3}
             if skill_keywords.intersection(text_words):
                 return skill
         return None

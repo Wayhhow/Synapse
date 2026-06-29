@@ -1,7 +1,7 @@
 {
-  "test_math_skill": {
-    "description": "Auto-generated skill for: Add two numbers",
-    "created_at": "2026-05-30T08:25:12.320236",
+  "calculator_skill": {
+    "description": "",
+    "created_at": "2026-01-01T00:00:00",
     "total_count": 0,
     "success_count": 0,
     "failure_count": 0,
@@ -10,18 +10,8 @@
     "health_score": 100.0
   },
   "data_analysis_skill": {
-    "description": "Perform statistical analysis on numerical data. Trigger words: analyze, statistics, data analysis, calculate stats, 统计, 分析",
-    "created_at": "2026-05-30T08:25:12.565191",
-    "total_count": 0,
-    "success_count": 0,
-    "failure_count": 0,
-    "last_error": null,
-    "avg_execution_time": 0.0,
-    "health_score": 100.0
-  },
-  "calculator_skill": {
-    "description": "Safely evaluate mathematical expressions. Trigger words: calculate, compute, math, evaluate expression, 计算, 数学",
-    "created_at": "2026-05-30T08:25:12.565418",
+    "description": "",
+    "created_at": "2026-01-01T00:00:00",
     "total_count": 0,
     "success_count": 0,
     "failure_count": 0,
@@ -30,8 +20,8 @@
     "health_score": 100.0
   },
   "news_skill": {
-    "description": "Fetch latest news articles from Google News RSS. Trigger words: news, latest news, headlines, 新闻, 资讯",
-    "created_at": "2026-05-30T08:25:12.565915",
+    "description": "",
+    "created_at": "2026-01-01T00:00:00",
     "total_count": 0,
     "success_count": 0,
     "failure_count": 0,
@@ -39,19 +29,9 @@
     "avg_execution_time": 0.0,
     "health_score": 100.0
   },
-  "weather_skill": {
-    "description": "Get the current weather for a specific location and optional date.",
-    "created_at": "2026-05-30T08:25:12.566362",
-    "total_count": 4,
-    "success_count": 3,
-    "failure_count": 1,
-    "last_error": "asyncio.run() cannot be called from a running event loop",
-    "avg_execution_time": 0.6291347146034241,
-    "health_score": 100.0
-  },
   "translation_skill": {
-    "description": "Translate text between languages using MyMemory API. Trigger words: translate, translation, 翻译, 语言转换",
-    "created_at": "2026-05-30T08:25:12.566797",
+    "description": "",
+    "created_at": "2026-01-01T00:00:00",
     "total_count": 0,
     "success_count": 0,
     "failure_count": 0,
@@ -60,8 +40,8 @@
     "health_score": 100.0
   },
   "web_search_skill": {
-    "description": "Search the web using DuckDuckGo. Trigger words: search, find, look up, web search, internet search, 搜索, 查找",
-    "created_at": "2026-05-30T08:25:12.567263",
+    "description": "",
+    "created_at": "2026-01-01T00:00:00",
     "total_count": 0,
     "success_count": 0,
     "failure_count": 0,
@@ -69,14 +49,14 @@
     "avg_execution_time": 0.0,
     "health_score": 100.0
   },
-  "stock_skill": {
+  "weather_skill": {
     "description": "",
-    "created_at": "2026-05-30T08:25:15.857360",
-    "total_count": 4,
-    "success_count": 2,
-    "failure_count": 2,
-    "last_error": "asyncio.run() cannot be called from a running event loop",
-    "avg_execution_time": 0.0004813075065612793,
+    "created_at": "2026-01-01T00:00:00",
+    "total_count": 0,
+    "success_count": 0,
+    "failure_count": 0,
+    "last_error": null,
+    "avg_execution_time": 0.0,
     "health_score": 100.0
   }
 }

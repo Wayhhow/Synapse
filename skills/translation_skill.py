@@ -1,4 +1,5 @@
 import httpx
+from urllib.parse import quote
 from pydantic import BaseModel, Field
 from typing import Type, Optional
 from core.base import BaseSkill
@@ -39,7 +40,7 @@ class TranslationSkill(BaseSkill):
         try:
             url = (
                 f"https://api.mymemory.translated.net/get"
-                f"?q={args.text}&langpair={args.source_language}|{args.target_language}"
+                f"?q={quote(args.text)}&langpair={args.source_language}|{args.target_language}"
             )
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.get(url)
