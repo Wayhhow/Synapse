@@ -24,7 +24,8 @@ class SkillRouter:
     Includes Meta-Evolution capabilities to write new skills if a required tool is missing.
     """
 
-    def __init__(self, skills_dir: str = "skills", api_key: Optional[str] = None, model_name: str = "gpt-4o-mini"):
+    def __init__(self, skills_dir: str = "skills", api_key: Optional[str] = None, model_name: str = "gpt-4o-mini",
+                 registry: Optional["SkillRegistry"] = None, memory: Optional["Memory"] = None):
         load_dotenv()
         self.skills_dir = skills_dir
         self.skills: Dict[str, BaseSkill] = {}
@@ -36,18 +37,24 @@ class SkillRouter:
         self.model_name = model_name
         self.client = AsyncOpenAI(api_key=self.api_key)
 
-        # Initialize Meta-Evolution Creator
-        self.skill_creator = SkillCreator(skills_dir=self.skills_dir, api_key=self.api_key, model_name=self.model_name)
+        # Initialize Skill Registry & Evaluator (allow injection for test isolation)
+        self.registry = registry if registry is not None else SkillRegistry()
 
-        # Initialize Memory System
-        self.memory = Memory(max_history=10, persist_path="data/memory.json")
+        # Initialize Meta-Evolution Creator (share the same registry so generated
+        # skills and execution stats land in the same place)
+        self.skill_creator = SkillCreator(
+            skills_dir=self.skills_dir, api_key=self.api_key, model_name=self.model_name,
+            registry=self.registry,
+        )
+
+        # Initialize Memory System (allow injection for test isolation)
+        self.memory = memory if memory is not None else Memory(max_history=10, persist_path="data/memory.json")
 
         # Initialize Sandbox
         self.sandbox = Sandbox(timeout=10)
 
-        # Initialize Skill Registry & Evaluator
-        self.registry = SkillRegistry()
-        self.evaluator = SkillEvaluator(self.registry)
+        # Initialize Evaluator (after registry is set)
+        self.evaluator = SkillEvaluator(self.registry, skills_dir=self.skills_dir)
         for skill_name, skill in self.skills.items():
             self.registry.register(skill_name, skill.description)
 

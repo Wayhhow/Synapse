@@ -128,3 +128,19 @@ def test_sandbox_exception():
     assert result.result is None
     assert result.error is not None
     assert "something went wrong" in result.error
+
+
+def test_sandbox_real_skill_e2e():
+    """End-to-end: run a real built-in skill through the sandbox and verify
+    the SandboxResult carries the correct Pydantic model back across the
+    process boundary (pickle round-trip preserves type)."""
+    from skills.calculator_skill import CalculatorSkill, CalculatorResponse
+
+    sandbox = Sandbox(timeout=5)
+    result = sandbox.execute(CalculatorSkill(), expression="(2 + 3) * 4")
+    assert isinstance(result, SandboxResult)
+    assert result.success is True
+    assert result.error is None
+    assert isinstance(result.result, CalculatorResponse)
+    assert result.result.result == 20.0
+    assert result.result.error is None

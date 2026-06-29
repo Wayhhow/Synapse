@@ -13,17 +13,20 @@ async def main():
     parser.add_argument("--skills", action="store_true", help="List all registered skills and exit")
     args = parser.parse_args()
 
-    router = SkillRouter()
-
     if args.skills:
+        router = SkillRouter()
         print("Registered skills:")
         for skill in router.skills.values():
             print(f"  - {skill.name}: {skill.description}")
         print(f"Total: {len(router.skills)} skill(s)")
         return
 
-    session_id = str(uuid.uuid4())
+    # Print the banner BEFORE initializing the router so the user sees the
+    # welcome message first, and the router's INFO logs (skill discovery, etc.)
+    # appear below it rather than above.
     print("Welcome to Synapse! Type your query or 'exit'/'quit' to leave.")
+    router = SkillRouter()
+    session_id = str(uuid.uuid4())
 
     try:
         while True:

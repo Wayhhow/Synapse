@@ -1,14 +1,21 @@
 import pytest
 import json
+import os
 from unittest.mock import patch, MagicMock, AsyncMock
 from router.router import SkillRouter
 from core.memory import Memory
+from core.skill_registry import SkillRegistry
 from skills.weather_skill import WeatherResponse
 
 @pytest.fixture
-def router():
-    # Pass a dummy API key so the initialization doesn't fail if no .env exists
-    r = SkillRouter(api_key="test-api-key")
+def router(tmpdir):
+    # Pass a dummy API key so the initialization doesn't fail if no .env exists.
+    # Use a temp registry + in-memory memory so tests never pollute the shared
+    # data/skill_registry.json (which is surfaced via GET /stats). Mock skills
+    # injected via patch.dict() get auto-registered through record_execution,
+    # so isolation is mandatory.
+    registry = SkillRegistry(persist_path=os.path.join(str(tmpdir), "registry.json"))
+    r = SkillRouter(api_key="test-api-key", registry=registry)
     # Disable sandbox for testing (mocks can't be pickled for multiprocessing)
     r.sandbox = None
     # Use an in-memory Memory (no persist_path) for test isolation
@@ -201,3 +208,15 @@ async def test_process_query_text_response(mock_create, router):
     # Verify it just returns the text string
     assert isinstance(result, str)
     assert result == "I'm just a simple routing agent, but hello there!"
+
+
+def test_router_fixture_uses_isolated_registry(router, tmpdir):
+    """Regression guard: the router fixture must use a temp registry so test
+    runs never pollute the shared data/skill_registry.json. Before this fix,
+    test_process_query_meta_evolution leaked a 'stock_skill' entry into the
+    shared file because record_execution auto-registers unknown skills."""
+    # The fixture's registry must persist to tmpdir, not the project data dir
+    assert router.registry.persist_path.startswith(str(tmpdir))
+    assert "data/skill_registry.json" not in router.registry.persist_path
+    # And memory must be in-memory (no persist_path leaking to data/memory.json)
+    assert router.memory.persist_path is None

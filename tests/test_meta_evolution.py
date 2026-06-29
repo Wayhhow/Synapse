@@ -2,12 +2,20 @@ import pytest
 import os
 import json
 from unittest.mock import patch, MagicMock, AsyncMock
+from core.skill_registry import SkillRegistry
 from meta.skill_creator import SkillCreator
 
 @pytest.fixture
 def skill_creator(tmpdir):
-    # Use a temporary directory for skills so we don't pollute the actual project
-    return SkillCreator(skills_dir=str(tmpdir), api_key="test-api-key")
+    # Use a temporary directory for skills AND a temp registry so we don't
+    # pollute the shared data/skill_registry.json (which is also used by the
+    # live SkillRouter and surfaced via GET /stats).
+    registry = SkillRegistry(persist_path=os.path.join(str(tmpdir), "registry.json"))
+    return SkillCreator(
+        skills_dir=str(tmpdir),
+        api_key="test-api-key",
+        registry=registry,
+    )
 
 @pytest.mark.asyncio
 @patch('openai.resources.chat.completions.AsyncCompletions.create', new_callable=AsyncMock)
@@ -142,3 +150,15 @@ async def test_generate_skill_ratchet_rollback_on_lower_quality(mock_create, ski
         restored = f.read()
     assert "OLD_VERSION_MARKER" in restored
     assert "eval(" not in restored
+
+
+def test_skill_creator_fixture_uses_isolated_registry(skill_creator, tmpdir):
+    """Regression guard: the skill_creator fixture must use a temp registry so
+    test runs do not pollute the shared data/skill_registry.json (which is
+    surfaced via GET /stats and would otherwise accumulate stale entries like
+    'test_math_skill', 'ratchet_skill', etc.)."""
+    # The fixture's registry must persist to the tmpdir, not the project's data dir
+    assert skill_creator.registry.persist_path.startswith(str(tmpdir))
+    assert "data/skill_registry.json" not in skill_creator.registry.persist_path
+    # And the temp registry file path is under tmpdir
+    assert os.path.dirname(skill_creator.registry.persist_path) == str(tmpdir)

@@ -21,3 +21,15 @@
 - [x] `tests/test_meta_evolution.py` 包含棘轮回滚场景
 - [x] `tests/test_skills_routing.py` 的 meta-evolution 测试验证 session_id 透传
 - [x] 运行 `pytest tests/ -v` 全部通过,无回归(37 passed)
+
+# 全流程测试发现并修复的额外 bug
+
+- [x] **数据污染 bug**:`test_skills_routing.py` 的 `router` fixture 用默认 `data/skill_registry.json`,`test_process_query_meta_evolution` 注入的 mock `stock_skill` 经 `record_execution` 自动注册到共享文件,导致 `/stats` 对不存在的技能报 "file not found" 警告
+  - 修复:`SkillRouter.__init__` 新增 `registry` 和 `memory` 可选注入参数;`router` fixture 改用 tmp registry + in-memory memory
+- [x] **SkillRouter 硬编码依赖 bug**:`__init__` 硬编码 `SkillRegistry()`、`Memory(persist_path="data/memory.json")`、`SkillCreator` 不共享 registry,无法做测试隔离也无法让生成技能的统计进入主 registry
+  - 修复:三个组件都支持注入;`skill_creator` 与主 router 共享同一 registry;`evaluator` 接收 `skills_dir`
+- [x] **CLI 日志顺序问题**:`SkillRouter()` 初始化的大量 INFO 日志在 "Welcome" 横幅之前输出,体验差
+  - 修复:`--skills` 分支提前初始化 router;正常分支先打印 Welcome 再初始化 router
+- [x] **新增回归测试**:`test_router_fixture_uses_isolated_registry`、`test_skill_creator_fixture_uses_isolated_registry`、`test_sandbox_real_skill_e2e` 锁定隔离与 E2E 契约
+- [x] **清理共享 registry 污染**:`data/skill_registry.json` 重置为 6 个真实技能,移除 `stock_skill`/`test_math_skill`/`math`/`ratchet_skill`/`echo_skill`/`x_skill`/`new_skill`/`y_skill` 等测试残留
+- [x] 最终全量验证:40 passed,registry 零污染,CLI/Web/沙箱/棘轮 E2E 全通过
