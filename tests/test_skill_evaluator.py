@@ -149,13 +149,17 @@ def test_evaluate_complete_skill_with_stats(tmpdir):
     evaluator = SkillEvaluator(registry=registry, skills_dir=skills_dir)
     score = evaluator.evaluate("my_skill")
 
+    # Bug-7/Bug-8 fix: dim3 and dim4 now use code/description inspection
+    # instead of runtime state, so the COMPLETE_SKILL_CODE fixture (which has
+    # no try/except, no `error` field, and no "Trigger words:" in description)
+    # scores lower than before.
     # dim1_structure = 20 (complete)
     # dim2_success_rate = 30 * (1/1) = 30
-    # dim3_error_handling = 20 (no last_error)
-    # dim4_specificity = 15 (description longer than 10 chars)
+    # dim3_error_handling = 5 (no try/except, no error field)
+    # dim4_specificity = 10 (description > 10 chars but no "Trigger words:")
     # dim5_antipattern = 15 (clean)
-    # total = 100
-    assert score == 100.0
+    # total = 80
+    assert score == 80.0
 
 
 def test_evaluate_missing_skill_file_returns_zero_for_code_dims(tmpdir):
@@ -168,13 +172,15 @@ def test_evaluate_missing_skill_file_returns_zero_for_code_dims(tmpdir):
     evaluator = SkillEvaluator(registry=registry, skills_dir=skills_dir)
     score = evaluator.evaluate("ghost_skill")
 
+    # Bug-7/Bug-8 fix: dim3 now scores 5 by default (no code to inspect),
+    # dim4 scores 10 (description > 10 chars but no "Trigger words:").
     # dim1_structure = 0 (no file)
     # dim2_success_rate = 30 * 1.0 = 30
-    # dim3_error_handling = 20
-    # dim4_specificity = 15 (description > 10 chars)
+    # dim3_error_handling = 5 (no code)
+    # dim4_specificity = 10 (description > 10 chars)
     # dim5_antipattern = 0 (no file)
-    # total = 65
-    assert score == 65.0
+    # total = 45
+    assert score == 45.0
 
 
 def test_evaluate_unregistered_skill_returns_zero(tmpdir):

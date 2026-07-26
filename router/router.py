@@ -32,10 +32,13 @@ class SkillRouter:
         self._loaded_modules: Dict[str, Any] = {}
         self._discover_skills()
 
-        # Initialize OpenAI Client
+        # OpenAI client is constructed lazily on first use so that operations
+        # that don't need an LLM (e.g. `python cli.py --skills`, registry
+        # inspection, /health endpoint) work without OPENAI_API_KEY set.
+        # Constructor validates key eagerly and would crash otherwise.
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.model_name = model_name
-        self.client = AsyncOpenAI(api_key=self.api_key)
+        self._client: Optional[AsyncOpenAI] = None
 
         # Initialize Skill Registry & Evaluator (allow injection for test isolation)
         self.registry = registry if registry is not None else SkillRegistry()
@@ -58,11 +61,28 @@ class SkillRouter:
         for skill_name, skill in self.skills.items():
             self.registry.register(skill_name, skill.description)
 
+    @property
+    def client(self) -> AsyncOpenAI:
+        """
+        Lazily construct the OpenAI client on first use. Lets `python cli.py
+        --skills` (and other introspection paths) work without an API key.
+        """
+        if self._client is None:
+            self._client = AsyncOpenAI(api_key=self.api_key)
+        return self._client
+
     def _discover_skills(self) -> None:
         """
         Dynamically scans the skills directory and loads all subclasses of BaseSkill.
         Handles importlib cache correctly: reloads existing modules and imports new ones.
         """
+        # Bug-6 fix: clear the previously discovered skills so that any file
+        # that has been removed from disk no longer lingers in the registry.
+        # ``self._loaded_modules`` is intentionally NOT cleared: we still need
+        # it to decide between `importlib.reload` (file modified) and
+        # `importlib.import_module` (new file) on the next pass.
+        self.skills = {}
+
         if not os.path.isdir(self.skills_dir):
             return
 
@@ -173,10 +193,38 @@ class SkillRouter:
 
         # If the LLM decided to use a tool (route to a skill)
         if message.tool_calls:
-            # For simplicity, we process the first tool call in this iteration
+            # Bug-27 fix: OpenAI may return multiple tool calls per turn.
+            # Full parallel/sequential execution of multiple tools is out of
+            # scope for this iteration (planned as a separate spec); for now
+            # we explicitly process only the first one and log a warning so
+            # silent drops do not go unnoticed during debugging.
+            if len(message.tool_calls) > 1:
+                logger.warning(
+                    f"Router: LLM returned {len(message.tool_calls)} tool_calls; "
+                    f"only the first one ('{message.tool_calls[0].function.name}') "
+                    f"will be executed in this iteration."
+                )
             tool_call = message.tool_calls[0]
             function_name = tool_call.function.name
-            arguments = json.loads(tool_call.function.arguments)
+            try:
+                arguments = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError as e:
+                logger.error(f"Router: failed to parse tool arguments JSON: {e}")
+                return f"Error: invalid tool arguments (not valid JSON): {e}"
+
+            # Bug-16 fix: tool arguments must be a JSON object so that
+            # `**arguments` unpacking works. Anything else (list, string,
+            # number) would have raised a confusing TypeError deeper in the
+            # skill's execute().
+            if not isinstance(arguments, dict):
+                logger.error(
+                    f"Router: tool arguments for '{function_name}' is "
+                    f"{type(arguments).__name__}, expected object"
+                )
+                return (
+                    f"Error: invalid tool arguments for '{function_name}': "
+                    f"expected JSON object, got {type(arguments).__name__}"
+                )
 
             # Meta-Evolution Intercept
             if function_name == "request_new_skill":
@@ -194,14 +242,22 @@ class SkillRouter:
                 if success:
                     # Dynamically reload skills
                     self._discover_skills()
-                    # Record the user's original query before retrying
-                    if session_id:
-                        self.memory.add_message(session_id, "user", user_query)
+                    # Bug-3 fix: do NOT record the user message here. The
+                    # recursive `process_query` call below will record it
+                    # exactly once if the retried skill succeeds, or record
+                    # a user + assistant-error pair if it fails. Recording
+                    # here as well led to duplicated user messages in history.
                     # Retry the original query
                     logger.info("Skill generated successfully. Retrying original query...")
                     return await self.process_query(user_query, is_retry=True, session_id=session_id)
                 else:
                     logger.error("Meta-Evolution failed to generate a valid skill.")
+                    if session_id:
+                        self.memory.add_message(session_id, "user", user_query)
+                        self.memory.add_message(
+                            session_id, "assistant",
+                            "Error: Meta-Evolution failed to generate a valid skill."
+                        )
                     return "Error: Meta-Evolution failed to generate a valid skill."
 
             # Standard Skill Routing
@@ -211,14 +267,36 @@ class SkillRouter:
                 start_time = time.time()
                 try:
                     if skill.use_sandbox and self.sandbox is not None:
-                        sandbox_result: SandboxResult = self.sandbox.execute(skill, **arguments)
+                        # Bug-2 fix: use the async sandbox entry point so the
+                        # FastAPI event loop is not blocked while the child
+                        # process runs.
+                        sandbox_result: SandboxResult = await self.sandbox.execute_async(skill, **arguments)
                         if not sandbox_result.success:
                             raise RuntimeError(sandbox_result.error or "Sandbox execution failed")
                         result = sandbox_result.result
                     else:
                         result = await skill.execute(**arguments)
                     execution_time = time.time() - start_time
-                    self.registry.record_execution(function_name, success=True, execution_time=execution_time)
+
+                    # Bug-4 fix: skills may catch exceptions internally and
+                    # return a response with a non-empty `error` field. The
+                    # previous code recorded `success=True` for those, which
+                    # inflated the skill's health score and hid failures from
+                    # the operator. Treat a truthy `error` field as a failure.
+                    is_soft_failure = False
+                    if isinstance(result, BaseModel) and getattr(result, "error", None):
+                        is_soft_failure = True
+                        soft_error_msg = str(result.error)
+                        self.registry.record_execution(
+                            function_name, success=False,
+                            execution_time=execution_time, error=soft_error_msg,
+                        )
+                        logger.warning(
+                            f"Skill '{function_name}' returned a response with "
+                            f"error field set: {soft_error_msg}"
+                        )
+                    if not is_soft_failure:
+                        self.registry.record_execution(function_name, success=True, execution_time=execution_time)
                 except Exception as e:
                     execution_time = time.time() - start_time
                     self.registry.record_execution(function_name, success=False, execution_time=execution_time, error=str(e))

@@ -163,14 +163,16 @@ flowchart LR
     B -->|multiprocessing.Process| C[子进程执行]
     C -->|Queue 返回结果| B
     B -->|结果| A
-    C -->|超时10秒| D[⛔ terminate]
+    C -->|超时10秒| D[⛔ terminate → kill]
 
     style D fill:#f44336,color:#fff
     style B fill:#0f3460,color:#fff
 ```
 
-- ✅ 技能异常不影响主进程
-- ✅ 10 秒超时自动终止
+- ✅ 技能异常不影响主进程（`multiprocessing.Process` 隔离）
+- ✅ 10 秒超时自动终止；若 `terminate()` 1 秒后仍存活，升级为 `kill()` (SIGKILL) 防僵尸进程
+- ✅ `Sandbox.execute_async` 通过 `run_in_executor` 在后台线程执行，不阻塞 FastAPI 事件循环
+- ✅ 显式关闭 `Queue` 防 fd 泄漏
 - ✅ `use_sandbox` 开关可关闭（开发调试用）
 
 ### 文件名安全
@@ -339,11 +341,23 @@ Synapse/
 | 零额外 API Key | ✅ | ❌ | ❌ | ❌ |
 | Web UI | ✅ 内置 | ❌ | ❌ | ✅ |
 
+## 已知限制
+
+诚实地列出当前的边界，方便使用者判断是否适合自己：
+
+- **沙箱是进程级而非容器级**：`multiprocessing.Process` 隔离了 GIL 和崩溃传播，但**不是**安全边界。Meta-Evolution 生成的代码在加载前会经过顶层 AST 安全检查 + 反模式扫描（堵住 `os.system` / `eval` / `subprocess` 等顶层调用），但若你需要在多租户/不可信环境部署，请额外套上 Docker/gVisor 等容器隔离。OpenManus 的 Docker 沙箱在这个维度更严格。
+- **依赖 OpenAI tool-calling**：技能路由通过 OpenAI Function Calling 决定，目前仅显式测试了 OpenAI API。接入 Anthropic / Gemini / Qwen 等兼容 OpenAI 协议的端点理论可行，但未做端到端验证。
+- **记忆是单 session FIFO**：当前 `Memory` 是按 `session_id` 隔离的最近 N 轮上下文（默认 10 轮 = 20 条消息），**不做** 语义抽取或跨 session 个性化。若需要长期记忆/向量检索，可替换 `router.memory` 为 mem0 或 LangGraph checkpointer（见 `synapse-memory/spec.md` 的 Decision Log）。
+- **Meta-Evolution 不是无中生有**：生成的技能质量受底层 LLM 能力影响。弱模型可能生成语法正确但语义错误的代码——这正是棘轮机制要兜底的场景，但兜底不等于万能。
+- **新闻技能仅返回标题+链接**：Google News RSS 不提供正文摘要；如需正文，需自行抓取或升级到带 API key 的服务。
+- **测试套件聚焦单元/集成**：当前 93 个测试覆盖核心组件与 Bug 修复回归，但**没有**端到端 LLM 真实调用的冒烟测试（避免 CI 烧 token）。生产部署前建议手动跑一次 `python cli.py` 验证真实链路。
+
 ## 致谢
 
 - **[darwin-skill](https://github.com/alchaincyf/darwin-skill)** — 多维度评估体系和棘轮机制的设计灵感来源（借鉴概念，未使用代码）
-- **[SkillLens](https://arxiv.org/abs/2605.23899)** (Microsoft Research) — 实证 rubric 设计
-- **[SkillOpt](https://arxiv.org/abs/2605.23904)** (Microsoft Research) — validation-gated edits 框架
+- **[SkillLens](https://arxiv.org/abs/2605.23899)** (Microsoft Research, 2026) — 实证 rubric 设计；指出 25% 的 LLM 生成技能会产生 negative transfer，验证了我们做棘轮的必要性
+- **[SkillOpt](https://arxiv.org/abs/2605.23904)** (Microsoft Research, 2026) — validation-gated edits 框架；其 "textual learning rate + held-out gate" 思路与我们的棘轮机制异曲同工
+- **[SKILLAXE](https://arxiv.org/abs/2606.10546)** (Microsoft Research, 2026) — evaluation-guided self-refinement；4 维诊断(quality impact / trigger precision / instruction compliance / solution-path coverage)启发了我们的 dim4 具体性评估
 - **[autoresearch](https://github.com/karpathy/autoresearch)** (Karpathy) — 自主实验循环的原始灵感
 
 ---
@@ -378,8 +392,15 @@ uvicorn web.app:app --reload  # Web UI mode
 
 - 🧬 **Meta-Evolution** — Auto-generates new skills when existing ones can't handle a request
 - 📊 **5-Dimension Skill Evaluation** — Structure, success rate, error handling, specificity, anti-patterns
-- 🔒 **Sandbox Execution** — LLM-generated code runs in isolated subprocesses
-- 💬 **Conversation Memory** — Multi-turn context with session management
+- 🔒 **Sandbox Execution** — LLM-generated code runs in isolated subprocesses (terminate → SIGKILL escalation, async-safe via `run_in_executor`)
+- 💬 **Conversation Memory** — Multi-turn context with session management (thread-safe `RLock` + atomic file writes)
 - 🔍 **6 Built-in Skills** — Web Search, Data Analysis, Calculator, Translation, News, Weather
 - 🌐 **Web UI** — Dark-themed chat interface via FastAPI
 - 🔑 **Zero Extra API Keys** — All skills use free APIs (except OpenAI)
+
+### Known Limitations
+
+- Sandbox is process-level (not container-level) — add Docker/gVisor for untrusted multi-tenant use
+- Routing depends on OpenAI tool-calling protocol; Anthropic/Gemini/Qwen compatibility unverified end-to-end
+- Memory is single-session FIFO (no semantic extraction / cross-session personalization) — swap `router.memory` for mem0 if you need long-term memory
+- Generated skill quality is bounded by the underlying LLM — the ratchet catches regressions but isn't omniscient

@@ -14,6 +14,14 @@ logger = logging.getLogger(__name__)
 
 router_instance: Optional[SkillRouter] = None
 
+# Bug-11 fix: compute the absolute path to the static directory relative to
+# this module's __file__ rather than the process's current working directory.
+# Previously the routes used the relative path "web/static/...", which 404'd
+# when uvicorn was launched from a directory other than the project root
+# (e.g. `cd /tmp && uvicorn web.app:app --app-dir /workspace`).
+_STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global router_instance
@@ -42,7 +50,13 @@ async def chat(request: ChatRequest):
     try:
         result = await router_instance.process_query(request.message, session_id=session_id)
         if isinstance(result, PydanticModel):
-            reply = str(result.model_dump())
+            # Bug-20 fix: previously we did `str(result.model_dump())`,
+            # which produced a Python dict repr like
+            # `{'location': 'Seattle', 'temperature': 25.0}` — single
+            # quotes, no indentation. JSON output is friendlier for API
+            # consumers (and consistent with how `curl` users expect JSON
+            # services to respond).
+            reply = result.model_dump_json(indent=2)
             skill_used = type(result).__name__
         else:
             reply = str(result)
@@ -81,6 +95,9 @@ async def history(session_id: str):
 
 @app.get("/")
 async def index():
-    return FileResponse("web/static/index.html")
+    # Bug-11 fix: serve the static index.html using the resolved absolute
+    # path so the route works regardless of the launcher's CWD.
+    return FileResponse(os.path.join(_STATIC_DIR, "index.html"))
 
-app.mount("/static", StaticFiles(directory="web/static"), name="static")
+# Bug-11 fix: mount the static directory using the absolute path too.
+app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
