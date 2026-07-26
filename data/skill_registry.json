@@ -1,62 +1,56 @@
 {
   "calculator_skill": {
-    "description": "",
+    "description": "Safely evaluate mathematical expressions. Trigger words: calculate, compute, math, evaluate expression, 计算, 数学",
     "created_at": "2026-01-01T00:00:00",
     "total_count": 0,
     "success_count": 0,
     "failure_count": 0,
     "last_error": null,
-    "avg_execution_time": 0.0,
-    "health_score": 100.0
+    "avg_execution_time": 0.0
   },
   "data_analysis_skill": {
-    "description": "",
+    "description": "Perform statistical analysis on numerical data. Trigger words: analyze, statistics, data analysis, calculate stats, 统计, 分析",
     "created_at": "2026-01-01T00:00:00",
     "total_count": 0,
     "success_count": 0,
     "failure_count": 0,
     "last_error": null,
-    "avg_execution_time": 0.0,
-    "health_score": 100.0
+    "avg_execution_time": 0.0
   },
   "news_skill": {
-    "description": "",
+    "description": "Fetch latest news articles from Google News RSS. Trigger words: news, latest news, headlines, 新闻, 资讯",
     "created_at": "2026-01-01T00:00:00",
     "total_count": 0,
     "success_count": 0,
     "failure_count": 0,
     "last_error": null,
-    "avg_execution_time": 0.0,
-    "health_score": 100.0
+    "avg_execution_time": 0.0
   },
   "translation_skill": {
-    "description": "",
+    "description": "Translate text between languages using MyMemory API. Trigger words: translate, translation, 翻译, 语言转换",
     "created_at": "2026-01-01T00:00:00",
     "total_count": 0,
     "success_count": 0,
     "failure_count": 0,
     "last_error": null,
-    "avg_execution_time": 0.0,
-    "health_score": 100.0
+    "avg_execution_time": 0.0
   },
   "web_search_skill": {
-    "description": "",
+    "description": "Search the web using DuckDuckGo. Trigger words: search, find, look up, web search, internet search, 搜索, 查找",
     "created_at": "2026-01-01T00:00:00",
     "total_count": 0,
     "success_count": 0,
     "failure_count": 0,
     "last_error": null,
-    "avg_execution_time": 0.0,
-    "health_score": 100.0
+    "avg_execution_time": 0.0
   },
   "weather_skill": {
-    "description": "",
+    "description": "Get the current weather for a specific location. Trigger words: weather, temperature, forecast, 天气, 温度",
     "created_at": "2026-01-01T00:00:00",
     "total_count": 0,
     "success_count": 0,
     "failure_count": 0,
     "last_error": null,
-    "avg_execution_time": 0.0,
-    "health_score": 100.0
+    "avg_execution_time": 0.0
   }
 }

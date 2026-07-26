@@ -5,7 +5,6 @@ from core.base import BaseSkill
 
 class WeatherArgs(BaseModel):
     location: str = Field(..., description="The city or location to get the weather for.")
-    date: str = Field(default="today", description="The date to get the weather for. Defaults to today.")
 
 class WeatherResponse(BaseModel):
     location: str
@@ -20,7 +19,12 @@ class WeatherSkill(BaseSkill):
 
     @property
     def description(self) -> str:
-        return "Get the current weather for a specific location and optional date."
+        # Bug-15 fix: previously advertised "optional date" support that the
+        # execute() method silently ignored — asking for "tomorrow" returned
+        # today's forecast. Description is now honest about the current
+        # scope, and "Trigger words:" enable the dim4_specificity evaluator
+        # to score this skill correctly.
+        return "Get the current weather for a specific location. Trigger words: weather, temperature, forecast, 天气, 温度"
 
     @property
     def expected_args(self) -> Type[BaseModel]:

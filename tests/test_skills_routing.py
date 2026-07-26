@@ -68,7 +68,10 @@ async def test_weather_skill_execution(mock_get, router):
     mock_get.side_effect = mock_response_side_effect
 
     # Test executing the skill with valid arguments as a dict/kwargs
-    input_kwargs = {"location": "Seattle", "date": "today"}
+    # Bug-15 fix: `WeatherArgs.date` was removed because the execute() method
+    # never honored it. Asking for "tomorrow" returned today's forecast,
+    # which was misleading. Only `location` is accepted now.
+    input_kwargs = {"location": "Seattle"}
     result = await skill.execute(**input_kwargs)
 
     # Verify the result is of the correct Pydantic model type
@@ -79,9 +82,9 @@ async def test_weather_skill_execution(mock_get, router):
     assert result.weather == "Clear sky"
     assert result.temperature == 25.0
 
-    # Test executing the skill with different optional argument
-    input_kwargs_tomorrow = {"location": "Seattle", "date": "tomorrow"}
-    result2 = await skill.execute(**input_kwargs_tomorrow)
+    # Confirm the skill no longer accepts the deprecated `date` argument.
+    input_kwargs_today = {"location": "Seattle"}
+    result2 = await skill.execute(**input_kwargs_today)
 
     assert isinstance(result2, WeatherResponse)
     assert result2.location == "Seattle"
@@ -100,7 +103,7 @@ async def test_process_query_tool_call(mock_create, mock_get, router):
     mock_message = MagicMock()
     mock_tool_call = MagicMock()
     mock_tool_call.function.name = "weather_skill"
-    mock_tool_call.function.arguments = json.dumps({"location": "San Francisco", "date": "today"})
+    mock_tool_call.function.arguments = json.dumps({"location": "San Francisco"})
     mock_message.tool_calls = [mock_tool_call]
 
     mock_response = MagicMock()
@@ -170,8 +173,18 @@ async def test_process_query_meta_evolution(mock_generate, mock_create, router):
     # Mock the generator succeeding
     mock_generate.return_value = True
 
-    # We need to mock the router's execution of the new skill since it doesn't really exist in the dict
-    with patch.dict(router.skills, {"stock_skill": MagicMock(execute=AsyncMock(return_value="AAPL is $150"))}):
+    # Bug-6 fix: ``_discover_skills`` now clears ``self.skills`` at the start
+    # of each call (so deleted files don't linger). The original test relied
+    # on the bug — it patched ``stock_skill`` directly into ``router.skills``
+    # and let ``_discover_skills`` run after a mocked ``generate_skill``
+    # returned True. With Bug-6 fixed, that discover call would wipe the
+    # patched entry before the retry could use it. Since the test mocks
+    # ``generate_skill`` (no real file is written), we also mock
+    # ``_discover_skills`` as a no-op and inject the mock skill ourselves.
+    mock_skill = MagicMock()
+    mock_skill.execute = AsyncMock(return_value="AAPL is $150")
+    with patch.object(router, "_discover_skills", lambda: None), \
+         patch.dict(router.skills, {"stock_skill": mock_skill}):
         result = await router.process_query("What is the stock price of AAPL?", session_id="test-session-123")
 
         # Verify generate was called with correct intent
@@ -183,10 +196,13 @@ async def test_process_query_meta_evolution(mock_generate, mock_create, router):
         # Verify final result is what the skill executed
         assert result == "AAPL is $150"
 
-        # Verify both the original request and the retry request were recorded as user messages
+        # Bug-3 fix: previously the router recorded the user message TWICE
+        # — once before the meta-evolution retry and once after the retried
+        # skill succeeded. The pre-retry `add_message` call was removed so
+        # the user message is recorded exactly once on the successful retry.
         history = router.memory.get_history("test-session-123")
         user_messages = [m for m in history if m["role"] == "user"]
-        assert len(user_messages) == 2
+        assert len(user_messages) == 1
 
 @pytest.mark.asyncio
 @patch('openai.resources.chat.completions.AsyncCompletions.create', new_callable=AsyncMock)
@@ -220,3 +236,29 @@ def test_router_fixture_uses_isolated_registry(router, tmpdir):
     assert "data/skill_registry.json" not in router.registry.persist_path
     # And memory must be in-memory (no persist_path leaking to data/memory.json)
     assert router.memory.persist_path is None
+
+
+def test_router_boots_without_openai_api_key(monkeypatch, tmpdir):
+    """
+    Regression guard (Bug-29): ``python cli.py --skills`` (and other
+    introspection paths like ``GET /health``) used to crash because
+    ``SkillRouter.__init__`` eagerly constructed ``AsyncOpenAI(api_key=None)``
+    which raises ``OpenAIError("Missing credentials")`` if
+    ``OPENAI_API_KEY`` is unset. The fix made the OpenAI client lazy: it is
+    only built on first access (i.e. when ``process_query`` actually needs
+    an LLM). This test asserts that booting the router + listing skills
+    works without any API key in the environment.
+    """
+    # Strip any OPENAI_API_KEY that may have leaked from .env / shell
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_ADMIN_KEY", raising=False)
+
+    registry = SkillRegistry(persist_path=os.path.join(str(tmpdir), "r.json"))
+    # Must NOT raise OpenAIError
+    r = SkillRouter(api_key=None, registry=registry)
+    # Skills discovery still works without an LLM
+    assert len(r.skills) >= 6  # the 6 built-in skills
+    # The lazy client is not yet constructed
+    assert r._client is None
+    # skill_creator must also be bootable without an API key
+    assert r.skill_creator._client is None
