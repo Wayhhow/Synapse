@@ -5,29 +5,62 @@ import inspect
 import json
 import logging
 import time
-from typing import Dict, Optional, Type, Union, List, Any
-from dotenv import load_dotenv
+from typing import Dict, Optional, Union, List, Any, AsyncIterator
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 from core.base import BaseSkill
+from core.config import SynapseConfig, load_env_file
 from core.memory import Memory
+from core.resilience import with_retries
 from core.sandbox import Sandbox, SandboxResult
 from core.skill_registry import SkillRegistry
+from core.tracer import TraceRecorder, Trace
 from meta.skill_creator import SkillCreator
 from meta.skill_evaluator import SkillEvaluator
 
 logger = logging.getLogger(__name__)
 
+SYSTEM_PROMPT = (
+    "You are Synapse, an intelligent agent backed by a growing library of skills.\n"
+    "Resolve the user's request step by step:\n"
+    "1. Call the most relevant tool(s) with valid JSON arguments.\n"
+    "2. After each tool result, either call another tool (if you need more data or an "
+    "action failed and another tool could help) or produce the final answer.\n"
+    "3. Prefer existing skills. Call `request_new_skill` ONLY if no existing tool can "
+    "possibly handle the request.\n"
+    "4. Answer in the user's language, concisely. Plain text without tools is only for "
+    "greetings or casual chat."
+)
+
+
 class SkillRouter:
     """
-    SkillRouter dynamically discovers and loads skills, and routes input to the appropriate skill using an LLM.
-    Includes Meta-Evolution capabilities to write new skills if a required tool is missing.
+    SkillRouter dynamically discovers and loads skills, and resolves user
+    queries with an OpenAI-compatible LLM.
+
+    Evolution from the original single-shot router: ``process_query`` now runs
+    a bounded ReAct-style agent loop (OpenManus/LangGraph style). Each round
+    the LLM may call one or more tools; every tool result is fed back as a
+    ``tool`` message, and the loop continues until the model produces a final
+    answer or ``config.max_steps`` rounds are consumed. ``max_steps=1``
+    reproduces the legacy single-shot behavior (skill result returned directly).
+
+    Self-healing: when a skill records ``config.auto_repair_threshold``
+    consecutive failures, the router triggers a Voyager-style LLM repair of
+    that skill's source (ratchet-gated, previous version archived).
     """
 
-    def __init__(self, skills_dir: str = "skills", api_key: Optional[str] = None, model_name: str = "gpt-4o-mini",
-                 registry: Optional["SkillRegistry"] = None, memory: Optional["Memory"] = None):
-        load_dotenv()
+    def __init__(self, skills_dir: str = "skills", api_key: Optional[str] = None,
+                 model_name: Optional[str] = None,
+                 registry: Optional["SkillRegistry"] = None, memory: Optional["Memory"] = None,
+                 config: Optional[SynapseConfig] = None):
+        load_env_file()
         self.skills_dir = skills_dir
+        self.config = config or SynapseConfig.from_env()
+        # Explicit kwargs win over env config (backwards compatible with the
+        # original constructor and used heavily by tests).
+        self.api_key = api_key or self.config.api_key
+        self.model_name = model_name or self.config.model
         self.skills: Dict[str, BaseSkill] = {}
         self._loaded_modules: Dict[str, Any] = {}
         self._discover_skills()
@@ -35,29 +68,43 @@ class SkillRouter:
         # OpenAI client is constructed lazily on first use so that operations
         # that don't need an LLM (e.g. `python cli.py --skills`, registry
         # inspection, /health endpoint) work without OPENAI_API_KEY set.
-        # Constructor validates key eagerly and would crash otherwise.
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.model_name = model_name
         self._client: Optional[AsyncOpenAI] = None
 
         # Initialize Skill Registry & Evaluator (allow injection for test isolation)
-        self.registry = registry if registry is not None else SkillRegistry()
+        self.registry = registry if registry is not None else SkillRegistry(persist_path=self.config.registry_persist_path)
 
         # Initialize Meta-Evolution Creator (share the same registry so generated
         # skills and execution stats land in the same place)
         self.skill_creator = SkillCreator(
             skills_dir=self.skills_dir, api_key=self.api_key, model_name=self.model_name,
-            registry=self.registry,
+            registry=self.registry, config=self.config,
         )
 
-        # Initialize Memory System (allow injection for test isolation)
-        self.memory = memory if memory is not None else Memory(max_history=10, persist_path="data/memory.json")
+        # Initialize Memory System (allow injection for test isolation). The
+        # rolling-summary hook needs an LLM, so it is only attached when an API
+        # key is available; otherwise Memory degrades to plain FIFO truncation.
+        if memory is not None:
+            self.memory = memory
+        else:
+            self.memory = Memory(
+                max_history=self.config.memory_max_history,
+                persist_path=self.config.memory_persist_path,
+                summarizer=self._summarize_history if self.api_key else None,
+            )
 
         # Initialize Sandbox
-        self.sandbox = Sandbox(timeout=10)
+        self.sandbox = Sandbox(timeout=self.config.sandbox_timeout)
 
         # Initialize Evaluator (after registry is set)
         self.evaluator = SkillEvaluator(self.registry, skills_dir=self.skills_dir)
+
+        # Observability
+        self.tracer = TraceRecorder(self.config.trace_path if self.config.trace_enabled else None)
+
+        # Skills reported as used by the most recent process_query call
+        # (surfaced via the web API for attribution).
+        self.last_skills_used: List[str] = []
+
         for skill_name, skill in self.skills.items():
             self.registry.register(skill_name, skill.description)
 
@@ -68,8 +115,32 @@ class SkillRouter:
         --skills` (and other introspection paths) work without an API key.
         """
         if self._client is None:
-            self._client = AsyncOpenAI(api_key=self.api_key)
+            kwargs: Dict[str, Any] = {"api_key": self.api_key, "timeout": self.config.llm_timeout}
+            if self.config.base_url:
+                kwargs["base_url"] = self.config.base_url
+            self._client = AsyncOpenAI(max_retries=self.config.llm_max_retries, **kwargs)
         return self._client
+
+    async def _summarize_history(self, dropped: List[dict]) -> str:
+        """Compress dropped conversation turns into a compact rolling summary
+        (the LLM-backed half of Memory's summarization support)."""
+        excerpt = "\n".join(f"{m['role']}: {m['content']}" for m in dropped)
+        response = await with_retries(
+            lambda: self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": (
+                        "Summarize this conversation excerpt into concise bullet points, "
+                        "preserving key facts: names, numbers, decisions and open questions. "
+                        "Maximum 120 words."
+                    )},
+                    {"role": "user", "content": excerpt},
+                ],
+                temperature=0.0,
+            ),
+            attempts=self.config.app_retries,
+        )
+        return response.choices[0].message.content or ""
 
     def _discover_skills(self) -> None:
         """
@@ -157,172 +228,327 @@ class SkillRouter:
 
         return tools
 
-    async def process_query(self, user_query: str, is_retry: bool = False, session_id: Optional[str] = None) -> Union[str, BaseModel]:
+    # ------------------------------------------------------------------
+    # Agent loop
+    # ------------------------------------------------------------------
+
+    async def process_query_events(self, user_query: str, session_id: Optional[str] = None) -> AsyncIterator[Dict[str, Any]]:
         """
-        Uses an LLM to understand the user's intent and intelligently route to a skill.
-        If a skill is triggered, executes it and returns its Pydantic response model.
-        If the meta-tool is triggered, dynamically generates the skill, reloads, and retries.
-        If no skill is triggered, returns the plain text LLM response.
+        Run the agent loop, yielding progress events:
+
+        - ``{"type": "llm", "step": n, "duration_ms": ms}``        — an LLM round finished
+        - ``{"type": "tool_start", "name": ..., "step": n}``       — a tool call began
+        - ``{"type": "tool_result", "name": ..., "success": bool,
+             "duration_ms": ms, "error": ...}``                     — a tool finished
+        - ``{"type": "meta", "status": "generating"|"ok"|"failed", "intent": ...}``
+        - ``{"type": "final", "text": str, "result": BaseModel|None, "skills_used": [...]}``
+
+        The final event is always the last one yielded.
+        """
+        trace: Optional[Trace] = self.tracer.start(user_query, session_id) if self.tracer.enabled else None
+        skills_used: List[str] = []
+        final_type = "error"
+
+        try:
+            # Compress overflowed history into a rolling summary when possible.
+            if session_id and self.memory.summarizer is not None:
+                await self.memory.apply_summary(session_id)
+
+            messages: List[Dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+            if session_id:
+                messages.extend(self.memory.get_history(session_id))
+            messages.append({"role": "user", "content": user_query})
+
+            if session_id:
+                self.memory.add_message(session_id, "user", user_query)
+
+            tools = self._get_tools_schema()
+            max_steps = max(1, self.config.max_steps)
+            final_text = ""
+            result_obj: Optional[BaseModel] = None
+            last_tool_content = ""
+            generated_intents: set = set()
+
+            for step in range(1, max_steps + 1):
+                t0 = time.monotonic()
+                try:
+                    response = await with_retries(
+                        lambda: self.client.chat.completions.create(
+                            model=self.model_name,
+                            messages=messages,
+                            tools=tools if tools else None,
+                            tool_choice="auto" if tools else None,
+                            temperature=self.config.temperature,
+                        ),
+                        attempts=self.config.app_retries,
+                    )
+                except Exception as e:
+                    logger.error(f"Router: LLM call failed: {e}")
+                    final_text = f"Error: LLM call failed: {e}"
+                    if trace:
+                        trace.add_step("llm", self.model_name, (time.monotonic() - t0) * 1000, success=False, error=str(e))
+                    yield {"type": "final", "text": final_text, "result": None, "skills_used": skills_used}
+                    if session_id:
+                        self.memory.add_message(session_id, "assistant", final_text)
+                    final_type = "error"
+                    return
+                llm_ms = (time.monotonic() - t0) * 1000
+                if trace:
+                    trace.add_step("llm", self.model_name, llm_ms)
+                yield {"type": "llm", "step": step, "duration_ms": round(llm_ms, 1)}
+
+                message = response.choices[0].message
+
+                # No tool call => final natural-language answer.
+                if not message.tool_calls:
+                    final_text = message.content or ""
+                    final_type = "text"
+                    break
+
+                # Append the assistant tool-call turn so the following tool
+                # results are accepted by the API.
+                messages.append({
+                    "role": "assistant",
+                    "content": message.content or None,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                        }
+                        for tc in message.tool_calls
+                    ],
+                })
+
+                # Bug-27 (fixed properly): execute EVERY tool call of the turn,
+                # in order, feeding each result back to the model.
+                for tool_call in message.tool_calls:
+                    function_name = tool_call.function.name
+                    try:
+                        arguments = json.loads(tool_call.function.arguments)
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Router: failed to parse tool arguments JSON: {e}")
+                        messages.append({
+                            "role": "tool", "tool_call_id": tool_call.id,
+                            "content": f"Error: invalid tool arguments (not valid JSON): {e}",
+                        })
+                        if trace:
+                            trace.add_step("tool", function_name, 0.0, success=False, error=f"bad JSON args: {e}")
+                        continue
+
+                    # Bug-16 fix: tool arguments must be a JSON object so that
+                    # `**arguments` unpacking works.
+                    if not isinstance(arguments, dict):
+                        logger.error(
+                            f"Router: tool arguments for '{function_name}' is "
+                            f"{type(arguments).__name__}, expected object"
+                        )
+                        messages.append({
+                            "role": "tool", "tool_call_id": tool_call.id,
+                            "content": (
+                                f"Error: invalid tool arguments for '{function_name}': "
+                                f"expected JSON object, got {type(arguments).__name__}"
+                            ),
+                        })
+                        continue
+
+                    yield {"type": "tool_start", "name": function_name, "step": step}
+
+                    # ---- Meta-Evolution intercept ----
+                    if function_name == "request_new_skill":
+                        intent = arguments.get("intent", user_query)
+                        if intent in generated_intents:
+                            tool_content = (
+                                "A skill for this intent was already requested in this conversation. "
+                                "It is now available in the tool list — call it directly; if it truly "
+                                "does not fit, answer with what you can."
+                            )
+                        else:
+                            generated_intents.add(intent)
+                            logger.info(f"Meta-Evolution triggered for intent: {intent}")
+                            yield {"type": "meta", "status": "generating", "intent": intent}
+                            if trace:
+                                trace.add_step("meta", "request_new_skill", 0.0, detail={"intent": intent})
+                            success = await self.skill_creator.generate_skill(
+                                intent=intent, requirements=arguments.get("requirements", "")
+                            )
+                            if success:
+                                # Pick up the new skill file; the next LLM round
+                                # receives a refreshed tool schema automatically.
+                                self._discover_skills()
+                                for name, skill in self.skills.items():
+                                    self.registry.register(name, skill.description)
+                                tool_content = (
+                                    f"Skill generated successfully for intent '{intent}'. "
+                                    "A new tool is now available in your tool list — call it now."
+                                )
+                                yield {"type": "meta", "status": "ok", "intent": intent}
+                            else:
+                                tool_content = (
+                                    f"Meta-Evolution failed to generate a valid skill for intent '{intent}'. "
+                                    "Explain to the user what you tried and answer as best you can."
+                                )
+                                yield {"type": "meta", "status": "failed", "intent": intent}
+                        messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": tool_content})
+                        continue
+
+                    # ---- Standard skill routing ----
+                    if function_name in self.skills:
+                        skill = self.skills[function_name]
+                        start_time = time.monotonic()
+                        success = False
+                        error_msg: Optional[str] = None
+                        try:
+                            if skill.use_sandbox and self.sandbox is not None:
+                                # Bug-2 fix: use the async sandbox entry point so the
+                                # FastAPI event loop is not blocked while the child
+                                # process runs.
+                                sandbox_result: SandboxResult = await self.sandbox.execute_async(skill, **arguments)
+                                if not sandbox_result.success:
+                                    raise RuntimeError(sandbox_result.error or "Sandbox execution failed")
+                                result = sandbox_result.result
+                            else:
+                                result = await skill.execute(**arguments)
+                            duration_ms = (time.monotonic() - start_time) * 1000
+
+                            # Bug-4 fix: skills may catch exceptions internally and
+                            # return a response with a non-empty `error` field — treat
+                            # that as a failure for the registry.
+                            soft_error = None
+                            if isinstance(result, BaseModel) and getattr(result, "error", None):
+                                soft_error = str(result.error)
+
+                            if soft_error:
+                                self.registry.record_execution(
+                                    function_name, success=False,
+                                    execution_time=duration_ms / 1000, error=soft_error,
+                                )
+                                logger.warning(
+                                    f"Skill '{function_name}' returned a response with error field set: {soft_error}"
+                                )
+                                error_msg = soft_error
+                            else:
+                                self.registry.record_execution(
+                                    function_name, success=True, execution_time=duration_ms / 1000
+                                )
+                                success = True
+                                result_obj = result if isinstance(result, BaseModel) else result_obj
+                                if function_name not in skills_used:
+                                    skills_used.append(function_name)
+                        except Exception as e:
+                            duration_ms = (time.monotonic() - start_time) * 1000
+                            error_msg = str(e)
+                            self.registry.record_execution(
+                                function_name, success=False,
+                                execution_time=duration_ms / 1000, error=str(e),
+                            )
+                            logger.error(f"Skill '{function_name}' execution failed: {e}")
+
+                        if trace:
+                            trace.add_step(
+                                "tool", function_name, duration_ms,
+                                success=success, error=error_msg,
+                            )
+                        yield {
+                            "type": "tool_result", "name": function_name,
+                            "success": success, "duration_ms": round(duration_ms, 1),
+                            "error": error_msg,
+                        }
+
+                        # ---- Self-healing ----
+                        if not success and self.config.auto_repair:
+                            await self._maybe_repair_skill(function_name, error_msg or "unknown error")
+
+                        # Feed the tool result back so the LLM can continue.
+                        if success:
+                            tool_content = (
+                                result.model_dump_json(indent=2)
+                                if isinstance(result, BaseModel) else str(result)
+                            )
+                            last_tool_content = tool_content
+                        else:
+                            tool_content = f"The skill '{function_name}' failed with error: {error_msg}"
+                        messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": tool_content})
+                    else:
+                        logger.error(f"Skill '{function_name}' was requested by LLM but not found in registered skills.")
+                        messages.append({
+                            "role": "tool", "tool_call_id": tool_call.id,
+                            "content": f"Error: tool '{function_name}' does not exist. Available tools: {', '.join(list(self.skills) + ['request_new_skill'])}",
+                        })
+
+                if step == max_steps:
+                    # Step budget exhausted: surface the best answer we have.
+                    if result_obj is not None:
+                        final_text = (
+                            result_obj.model_dump_json(indent=2)
+                            if isinstance(result_obj, BaseModel) else str(result_obj)
+                        )
+                    elif last_tool_content:
+                        final_text = last_tool_content
+                    else:
+                        final_text = message.content or "Reached the maximum number of reasoning steps without a final answer."
+                    final_type = "max_steps"
+
+            self.last_skills_used = skills_used
+            yield {"type": "final", "text": final_text, "result": result_obj, "skills_used": skills_used}
+            if session_id:
+                self.memory.add_message(session_id, "assistant", final_text)
+
+        finally:
+            if trace is not None:
+                self.tracer.write(trace, final_type=final_type)
+
+    async def _maybe_repair_skill(self, skill_name: str, error: str) -> None:
+        """Trigger a ratchet-gated LLM repair once a skill accumulates
+        ``auto_repair_threshold`` consecutive failures."""
+        if not self.config.auto_repair:
+            return
+        stats = self.registry.get_stats(skill_name)
+        if not stats:
+            return
+        consecutive = stats.get("consecutive_failures", 0)
+        if consecutive < self.config.auto_repair_threshold:
+            return
+        logger.warning(
+            f"Router: skill '{skill_name}' failed {consecutive} times in a row; triggering auto-repair."
+        )
+        # Reset the counter first so a failing repair does not re-trigger on
+        # every subsequent call (the next repair needs a fresh failure run).
+        self.registry.reset_failures(skill_name)
+        try:
+            repaired = await self.skill_creator.repair_skill(skill_name, error=error)
+        except Exception as e:
+            logger.error(f"Router: auto-repair of '{skill_name}' crashed: {e}")
+            return
+        if repaired:
+            self._discover_skills()
+            logger.info(f"Router: skill '{skill_name}' was repaired and reloaded.")
+
+    async def process_query(self, user_query: str, is_retry: bool = False,
+                            session_id: Optional[str] = None) -> Union[str, BaseModel]:
+        """
+        Resolve a user query through the agent loop and return the outcome:
+        the final natural-language answer (str), or the skill's Pydantic
+        result when running in legacy single-shot mode (``max_steps=1``).
 
         Args:
             user_query: The user's natural language query.
-            is_retry: Whether this call is a retry after meta-evolution generated a new skill.
-                      Prevents infinite loops if skill generation succeeds but routing still fails.
+            is_retry: Deprecated; retained for API compatibility. The agent
+                      loop has no separate retry path — meta-evolution is a
+                      regular step inside the loop.
+            session_id: Optional conversation id for memory.
         """
-        messages = [
-            {"role": "system", "content": "You are Synapse, an intelligent routing agent. Use the provided tools to answer the user's query if applicable. If NO tool is suitable, you MUST call the `request_new_skill` tool. Only answer directly via plain text if it's a simple greeting or casual chat."},
-        ]
-
-        if session_id:
-            history = self.memory.get_history(session_id)
-            messages.extend(history)
-
-        messages.append({"role": "user", "content": user_query})
-
-        tools = self._get_tools_schema()
-
-        # Make the LLM call
-        response = await self.client.chat.completions.create(
-            model=self.model_name,
-            messages=messages,
-            tools=tools if tools else None,
-            tool_choice="auto" if tools else None
-        )
-
-        message = response.choices[0].message
-
-        # If the LLM decided to use a tool (route to a skill)
-        if message.tool_calls:
-            # Bug-27 fix: OpenAI may return multiple tool calls per turn.
-            # Full parallel/sequential execution of multiple tools is out of
-            # scope for this iteration (planned as a separate spec); for now
-            # we explicitly process only the first one and log a warning so
-            # silent drops do not go unnoticed during debugging.
-            if len(message.tool_calls) > 1:
-                logger.warning(
-                    f"Router: LLM returned {len(message.tool_calls)} tool_calls; "
-                    f"only the first one ('{message.tool_calls[0].function.name}') "
-                    f"will be executed in this iteration."
-                )
-            tool_call = message.tool_calls[0]
-            function_name = tool_call.function.name
-            try:
-                arguments = json.loads(tool_call.function.arguments)
-            except json.JSONDecodeError as e:
-                logger.error(f"Router: failed to parse tool arguments JSON: {e}")
-                return f"Error: invalid tool arguments (not valid JSON): {e}"
-
-            # Bug-16 fix: tool arguments must be a JSON object so that
-            # `**arguments` unpacking works. Anything else (list, string,
-            # number) would have raised a confusing TypeError deeper in the
-            # skill's execute().
-            if not isinstance(arguments, dict):
-                logger.error(
-                    f"Router: tool arguments for '{function_name}' is "
-                    f"{type(arguments).__name__}, expected object"
-                )
-                return (
-                    f"Error: invalid tool arguments for '{function_name}': "
-                    f"expected JSON object, got {type(arguments).__name__}"
-                )
-
-            # Meta-Evolution Intercept
-            if function_name == "request_new_skill":
-                if is_retry:
-                    logger.warning("Meta-Evolution retry failed: already attempted to generate a skill for this intent.")
-                    return "Error: Already attempted to generate a skill for this intent, but failed to execute it."
-
-                logger.info(f"Meta-Evolution triggered for intent: {arguments.get('intent')}")
-
-                success = await self.skill_creator.generate_skill(
-                    intent=arguments.get("intent", user_query),
-                    requirements=arguments.get("requirements", "")
-                )
-
-                if success:
-                    # Dynamically reload skills
-                    self._discover_skills()
-                    # Bug-3 fix: do NOT record the user message here. The
-                    # recursive `process_query` call below will record it
-                    # exactly once if the retried skill succeeds, or record
-                    # a user + assistant-error pair if it fails. Recording
-                    # here as well led to duplicated user messages in history.
-                    # Retry the original query
-                    logger.info("Skill generated successfully. Retrying original query...")
-                    return await self.process_query(user_query, is_retry=True, session_id=session_id)
-                else:
-                    logger.error("Meta-Evolution failed to generate a valid skill.")
-                    if session_id:
-                        self.memory.add_message(session_id, "user", user_query)
-                        self.memory.add_message(
-                            session_id, "assistant",
-                            "Error: Meta-Evolution failed to generate a valid skill."
-                        )
-                    return "Error: Meta-Evolution failed to generate a valid skill."
-
-            # Standard Skill Routing
-            if function_name in self.skills:
-                skill = self.skills[function_name]
-
-                start_time = time.time()
-                try:
-                    if skill.use_sandbox and self.sandbox is not None:
-                        # Bug-2 fix: use the async sandbox entry point so the
-                        # FastAPI event loop is not blocked while the child
-                        # process runs.
-                        sandbox_result: SandboxResult = await self.sandbox.execute_async(skill, **arguments)
-                        if not sandbox_result.success:
-                            raise RuntimeError(sandbox_result.error or "Sandbox execution failed")
-                        result = sandbox_result.result
-                    else:
-                        result = await skill.execute(**arguments)
-                    execution_time = time.time() - start_time
-
-                    # Bug-4 fix: skills may catch exceptions internally and
-                    # return a response with a non-empty `error` field. The
-                    # previous code recorded `success=True` for those, which
-                    # inflated the skill's health score and hid failures from
-                    # the operator. Treat a truthy `error` field as a failure.
-                    is_soft_failure = False
-                    if isinstance(result, BaseModel) and getattr(result, "error", None):
-                        is_soft_failure = True
-                        soft_error_msg = str(result.error)
-                        self.registry.record_execution(
-                            function_name, success=False,
-                            execution_time=execution_time, error=soft_error_msg,
-                        )
-                        logger.warning(
-                            f"Skill '{function_name}' returned a response with "
-                            f"error field set: {soft_error_msg}"
-                        )
-                    if not is_soft_failure:
-                        self.registry.record_execution(function_name, success=True, execution_time=execution_time)
-                except Exception as e:
-                    execution_time = time.time() - start_time
-                    self.registry.record_execution(function_name, success=False, execution_time=execution_time, error=str(e))
-                    logger.error(f"Skill '{function_name}' execution failed: {e}")
-
-                    if session_id:
-                        self.memory.add_message(session_id, "user", user_query)
-                        self.memory.add_message(session_id, "assistant", str(f"Error: Skill '{function_name}' execution failed: {e}"))
-
-                    return f"Error: Skill '{function_name}' execution failed: {e}"
-
-                if session_id:
-                    self.memory.add_message(session_id, "user", user_query)
-                    self.memory.add_message(session_id, "assistant", str(result))
-
-                return result
-            else:
-                logger.error(f"Skill '{function_name}' was requested by LLM but not found in registered skills.")
-                return f"Error: Skill '{function_name}' was requested by LLM but not found in registered skills."
-
-        # If no tool was called, return the plain text response
-        text_result = message.content or ""
-        if session_id:
-            self.memory.add_message(session_id, "user", user_query)
-            self.memory.add_message(session_id, "assistant", text_result)
-        return text_result
+        final_text = ""
+        result_obj: Optional[BaseModel] = None
+        async for event in self.process_query_events(user_query, session_id=session_id):
+            if event["type"] == "final":
+                final_text = event["text"]
+                result_obj = event.get("result")
+        # Legacy contract: with max_steps == 1 the skill's structured result is
+        # returned directly (matching the original single-shot router).
+        if self.config.max_steps <= 1 and result_obj is not None:
+            return result_obj
+        return final_text
 
     def route(self, text: str) -> Optional[BaseSkill]:
         """

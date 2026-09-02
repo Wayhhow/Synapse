@@ -5,6 +5,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 from router.router import SkillRouter
 from core.memory import Memory
 from core.skill_registry import SkillRegistry
+from core.config import SynapseConfig
 from skills.weather_skill import WeatherResponse
 
 @pytest.fixture
@@ -13,9 +14,11 @@ def router(tmpdir):
     # Use a temp registry + in-memory memory so tests never pollute the shared
     # data/skill_registry.json (which is surfaced via GET /stats). Mock skills
     # injected via patch.dict() get auto-registered through record_execution,
-    # so isolation is mandatory.
+    # so isolation is mandatory. Tracing is disabled so tests never write
+    # data/traces.jsonl in the repository.
     registry = SkillRegistry(persist_path=os.path.join(str(tmpdir), "registry.json"))
-    r = SkillRouter(api_key="test-api-key", registry=registry)
+    config = SynapseConfig(trace_enabled=False)
+    r = SkillRouter(api_key="test-api-key", registry=registry, config=config)
     # Disable sandbox for testing (mocks can't be pickled for multiprocessing)
     r.sandbox = None
     # Use an in-memory Memory (no persist_path) for test isolation
@@ -99,16 +102,22 @@ def test_missing_skill(router):
 @patch("httpx.AsyncClient.get", new_callable=AsyncMock)
 @patch('openai.resources.chat.completions.AsyncCompletions.create', new_callable=AsyncMock)
 async def test_process_query_tool_call(mock_create, mock_get, router):
-    # Mock the LLM returning a tool call
+    # Agentic loop: round 1 the LLM calls the weather tool, round 2 it turns
+    # the tool result into a natural-language final answer.
     mock_message = MagicMock()
     mock_tool_call = MagicMock()
     mock_tool_call.function.name = "weather_skill"
     mock_tool_call.function.arguments = json.dumps({"location": "San Francisco"})
     mock_message.tool_calls = [mock_tool_call]
 
-    mock_response = MagicMock()
-    mock_response.choices = [MagicMock(message=mock_message)]
-    mock_create.return_value = mock_response
+    mock_final = MagicMock()
+    mock_final.tool_calls = None
+    mock_final.content = "San Francisco is currently 22.0°C with mainly clear skies."
+
+    mock_create.side_effect = [
+        MagicMock(choices=[MagicMock(message=mock_message)]),
+        MagicMock(choices=[MagicMock(message=mock_final)]),
+    ]
 
     # Mock HTTP responses for the weather skill
     def mock_response_side_effect(url, **kwargs):
@@ -137,19 +146,25 @@ async def test_process_query_tool_call(mock_create, mock_get, router):
 
     result = await router.process_query("What is the weather in San Francisco?")
 
-    # Verify the LLM was called
-    mock_create.assert_called_once()
+    # Verify the LLM was called once for the tool round and once for the answer
+    assert mock_create.call_count == 2
 
-    # Verify the skill was executed and returned the expected Pydantic model
-    assert isinstance(result, WeatherResponse)
-    assert result.location == "San Francisco"
-    assert result.weather == "Mainly clear"
+    # The tool result must have been fed back to the LLM as a `tool` message
+    second_call_messages = mock_create.call_args_list[1].kwargs["messages"]
+    assert any(m.get("role") == "tool" for m in second_call_messages)
+
+    # The final result is the LLM's natural-language answer
+    assert isinstance(result, str)
+    assert "22.0" in result
+    # Skill attribution is recorded on the router for the web layer
+    assert router.last_skills_used == ["weather_skill"]
 
 @pytest.mark.asyncio
 @patch('openai.resources.chat.completions.AsyncCompletions.create', new_callable=AsyncMock)
 @patch('meta.skill_creator.SkillCreator.generate_skill', new_callable=AsyncMock)
 async def test_process_query_meta_evolution(mock_generate, mock_create, router):
-    # Setup LLM to first request a new skill, then on retry, route to the newly generated skill
+    # Agentic loop: round 1 requests a new skill, round 2 calls the freshly
+    # generated skill, round 3 composes the final answer from its result.
 
     # First call: LLM calls request_new_skill
     mock_msg1 = MagicMock()
@@ -158,16 +173,22 @@ async def test_process_query_meta_evolution(mock_generate, mock_create, router):
     mock_tc1.function.arguments = json.dumps({"intent": "Get stock price"})
     mock_msg1.tool_calls = [mock_tc1]
 
-    # Second call (Retry): LLM calls the new skill
+    # Second call: LLM calls the new skill
     mock_msg2 = MagicMock()
     mock_tc2 = MagicMock()
     mock_tc2.function.name = "stock_skill" # Pretend it was created and loaded
     mock_tc2.function.arguments = json.dumps({"symbol": "AAPL"})
     mock_msg2.tool_calls = [mock_tc2]
 
+    # Third call: LLM answers with the tool result in hand
+    mock_msg3 = MagicMock()
+    mock_msg3.tool_calls = None
+    mock_msg3.content = "AAPL is $150"
+
     mock_create.side_effect = [
         MagicMock(choices=[MagicMock(message=mock_msg1)]),
-        MagicMock(choices=[MagicMock(message=mock_msg2)])
+        MagicMock(choices=[MagicMock(message=mock_msg2)]),
+        MagicMock(choices=[MagicMock(message=mock_msg3)]),
     ]
 
     # Mock the generator succeeding
@@ -190,16 +211,13 @@ async def test_process_query_meta_evolution(mock_generate, mock_create, router):
         # Verify generate was called with correct intent
         mock_generate.assert_called_once_with(intent="Get stock price", requirements="")
 
-        # Verify LLM was called twice (initial + retry)
-        assert mock_create.call_count == 2
+        # Verify LLM was called three times: request -> use new skill -> answer
+        assert mock_create.call_count == 3
 
-        # Verify final result is what the skill executed
+        # Verify final result is the LLM's answer
         assert result == "AAPL is $150"
 
-        # Bug-3 fix: previously the router recorded the user message TWICE
-        # — once before the meta-evolution retry and once after the retried
-        # skill succeeded. The pre-retry `add_message` call was removed so
-        # the user message is recorded exactly once on the successful retry.
+        # Bug-3 fix: the user message must be recorded exactly once.
         history = router.memory.get_history("test-session-123")
         user_messages = [m for m in history if m["role"] == "user"]
         assert len(user_messages) == 1

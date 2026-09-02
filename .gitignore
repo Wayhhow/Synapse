@@ -1,3 +1,10 @@
 __pycache__/
 *.pyc
 .env
+data/
+exported_skills/
+skills/.archive/
+*.egg-info/
+dist/
+build/
+.venv/

@@ -14,7 +14,6 @@ import json
 import os
 import threading
 
-import pytest
 
 from core.memory import Memory
 

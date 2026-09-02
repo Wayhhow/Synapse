@@ -62,6 +62,7 @@ class SkillRegistry:
                     "total_count": 0,
                     "success_count": 0,
                     "failure_count": 0,
+                    "consecutive_failures": 0,
                     "last_error": None,
                     "avg_execution_time": 0.0,
                 }
@@ -90,6 +91,7 @@ class SkillRegistry:
                     "total_count": 0,
                     "success_count": 0,
                     "failure_count": 0,
+                    "consecutive_failures": 0,
                     "last_error": None,
                     "avg_execution_time": 0.0,
                 }
@@ -97,6 +99,7 @@ class SkillRegistry:
             stats["total_count"] += 1
             if success:
                 stats["success_count"] += 1
+                stats["consecutive_failures"] = 0
                 # Bug-7 (related): clear stale last_error on a fresh success so
                 # the registry no longer carries forward an old failure forever.
                 # The evaluator no longer reads last_error, but the field is
@@ -105,6 +108,7 @@ class SkillRegistry:
                 stats["last_error"] = None
             else:
                 stats["failure_count"] += 1
+                stats["consecutive_failures"] = stats.get("consecutive_failures", 0) + 1
                 stats["last_error"] = error
             if stats["total_count"] > 0:
                 old_avg = stats["avg_execution_time"]
@@ -124,6 +128,16 @@ class SkillRegistry:
         # iterate / mutate without holding the lock.
         with self._lock:
             return {name: dict(stats) for name, stats in self._stats.items()}
+
+    def reset_failures(self, skill_name: str) -> None:
+        """Clear the consecutive-failure counter (used by the auto-repair loop
+        after it has attempted a fix, so the next repair trigger requires a
+        fresh run of consecutive failures instead of firing on every call)."""
+        with self._lock:
+            stats = self._stats.get(skill_name)
+            if stats is not None and stats.get("consecutive_failures"):
+                stats["consecutive_failures"] = 0
+                self._save_locked()
 
     def _save_locked(self) -> None:
         """Caller MUST already hold ``self._lock``."""

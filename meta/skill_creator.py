@@ -1,15 +1,18 @@
 import os
+import re
 import ast
 import json
 import logging
 import importlib.util
 import inspect
+from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, Field
-from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from core.skill_registry import SkillRegistry
 from core.base import BaseSkill
+from core.config import SynapseConfig, load_env_file
+from core.resilience import with_retries
 from meta.skill_evaluator import SkillEvaluator
 
 logger = logging.getLogger(__name__)
@@ -21,20 +24,32 @@ class GeneratedSkill(BaseModel):
 
 class SkillCreator:
     """
-    SkillCreator is the Meta-Evolution Module responsible for writing and saving new skills using an LLM.
+    SkillCreator is the Meta-Evolution Module responsible for writing and saving
+    new skills using an LLM.
+
+    Generation follows the Voyager "iterative prompting mechanism" (Wang et al.,
+    2023): instead of a single generate-then-pray call, the creator runs up to
+    ``config.generate_max_attempts`` rounds of generate -> validate -> feed the
+    validation/execution errors back to the LLM -> regenerate. The ratchet
+    (score must not decrease) gates every write, and replaced skill files are
+    archived under ``skills/.archive/`` instead of being destroyed, so evolution
+    keeps a fossil record.
     """
 
     def __init__(
         self,
         skills_dir: str = "skills",
         api_key: Optional[str] = None,
-        model_name: str = "gpt-4o-mini",
+        model_name: Optional[str] = None,
         registry: Optional[SkillRegistry] = None,
+        config: Optional[SynapseConfig] = None,
     ):
-        load_dotenv()
+        load_env_file()
         self.skills_dir = skills_dir
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.model_name = model_name
+        self.config = config or SynapseConfig.from_env()
+        # Explicit kwargs win over env config (tests inject dummies).
+        self.api_key = api_key or self.config.api_key
+        self.model_name = model_name or self.config.model
         # Lazy: only construct the OpenAI client when generate_skill() is
         # actually called. This lets SkillRouter boot for introspection
         # (e.g. `python cli.py --skills`, /health endpoint) without an
@@ -46,70 +61,68 @@ class SkillCreator:
     @property
     def client(self) -> AsyncOpenAI:
         if self._client is None:
-            self._client = AsyncOpenAI(api_key=self.api_key)
+            client_kwargs = {}
+            if self.config.base_url:
+                client_kwargs["base_url"] = self.config.base_url
+            if client_kwargs:
+                self._client = AsyncOpenAI(api_key=self.api_key, **client_kwargs)
+            else:
+                self._client = AsyncOpenAI(api_key=self.api_key)
         return self._client
+
+    @property
+    def archive_dir(self) -> str:
+        return os.path.join(self.skills_dir, ".archive")
+
+    # ------------------------------------------------------------------
+    # Public entry points
+    # ------------------------------------------------------------------
 
     async def generate_skill(self, intent: str, requirements: str = "") -> bool:
         """
-        Uses an LLM to generate a new Python skill and saves it to the skills directory.
-        Returns True if successful, False otherwise.
+        Uses an LLM to generate a new Python skill and saves it to the skills
+        directory. Returns True if successful, False otherwise.
+
+        Voyager-style loop: each failed validation round feeds the exact
+        errors back into the next generation attempt, so transient model
+        mistakes (a missing import, a bad filename) are repaired without
+        human intervention.
 
         Security ordering (Bug-1 fix): top-level safety check + antipattern AST
         evaluation happen BEFORE the module is loaded via `exec_module`, so that
         a malicious `import os; os.system(...)` at module top level is rejected
         instead of executed in the main process.
         """
-        system_prompt = (
-            "You are a master Python software engineer working on the Synapse AI agent architecture. "
-            "Your task is to create a new skill to satisfy the user's intent. "
-            "The new skill MUST STRICTLY follow these rules:\n"
-            "1. It must be a complete Python file.\n"
-            "2. It must define Pydantic models for both arguments and response (e.g., `MyArgs`, `MyResponse`).\n"
-            "3. It must define a class that inherits from `core.base.BaseSkill`.\n"
-            "4. The class must implement `name`, `description`, `expected_args`, and `expected_response_type` as @property.\n"
-            "5. The class must implement `async def execute(self, **kwargs) -> BaseModel`.\n"
-            "6. You must provide a JSON response containing 'filename', 'class_name', and 'code' conforming to the GeneratedSkill schema.\n"
-            "Do not return markdown, only the raw JSON string matching the GeneratedSkill schema."
-        )
-
-        user_prompt = f"Intent: {intent}\nRequirements: {requirements}"
-
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                response_format={"type": "json_object"}
-            )
-
-            content = response.choices[0].message.content
-
-            # Parse the JSON and validate it against the GeneratedSkill Pydantic model
-            skill_data = json.loads(content)
-            generated_skill = GeneratedSkill(**skill_data)
+        feedback = ""
+        for attempt in range(1, max(1, self.config.generate_max_attempts) + 1):
+            skill_data = await self._request_skill_json(intent, requirements, feedback)
+            if skill_data is None:
+                return False
 
             # 1. Basic syntax check
             try:
-                ast.parse(generated_skill.code)
+                ast.parse(skill_data.code)
             except SyntaxError as e:
                 logger.error(f"SkillCreator: Generated code contains syntax errors: {e}")
-                return False
+                feedback = f"SyntaxError: {e}. Fix the syntax and return the complete corrected file."
+                continue
 
             # 2. Bug-1 fix: top-level safety check BEFORE any module load / file write.
-            #    Rejects top-level function calls (e.g. `os.system(...)`, `eval(...)`)
-            #    that would execute during `exec_module` in the main process.
-            rejection = self._check_top_level_safety(generated_skill.code)
+            rejection = self._check_top_level_safety(skill_data.code)
             if rejection is not None:
                 logger.error(f"SkillCreator: rejected unsafe generated code: {rejection}")
-                return False
+                feedback = (
+                    f"SECURITY REJECTION: {rejection}. Top-level code may only contain imports, "
+                    "class/function definitions, constant assignments and docstrings. "
+                    "Move any executable logic inside methods."
+                )
+                continue
 
             # 3. Bug-28 fix: AST-based antipattern check on the whole code body
             #    (catches `getattr(builtins, "eval")("1")` style obfuscation that
             #    substring matching misses). The penalty returned by
             #    `check_antipattern_ast` is `15 - 5*hits` clamped to 0:
-            #      0 hits → 15 (clean)   1 hit → 10   2 hits → 5   3+ hits → 0
+            #      0 hits -> 15 (clean)   1 hit -> 10   2 hits -> 5   3+ hits -> 0
             #    We reject only when 3+ dangerous calls are detected (penalty
             #    reaches 0). 1-2 hits are left to the ratchet mechanism, which
             #    will roll back the new file when its total score is lower than
@@ -117,16 +130,22 @@ class SkillCreator:
             #    `test_generate_skill_ratchet_rollback_on_lower_quality` test
             #    meaningful (it relies on a single `eval` going through the
             #    antipattern gate so the ratchet can reject it).
-            antipattern_penalty = self.evaluator.check_antipattern_ast(generated_skill.code)
+            antipattern_penalty = self.evaluator.check_antipattern_ast(skill_data.code)
             if antipattern_penalty <= 0.0:
                 logger.error(
                     "SkillCreator: rejected generated code - 3 or more "
                     "dangerous calls detected by AST scan."
                 )
-                return False
+                feedback = (
+                    "SECURITY REJECTION: 3 or more dangerous calls (eval/exec/os.system/"
+                    "subprocess/...) detected. Remove them and implement the logic with safe "
+                    "library calls instead."
+                )
+                continue
 
             # 4. Bug-10 fix: avoid generating a duplicate skill. If an existing
             #    skill already covers this intent (high keyword overlap), skip.
+            #    Retrying cannot fix a duplicate, so return immediately.
             similar = self._find_similar_skill(intent)
             if similar is not None:
                 logger.warning(
@@ -135,14 +154,13 @@ class SkillCreator:
                 )
                 return False
 
-            # 5. Filename safety
-            if not generated_skill.filename.endswith(".py"):
-                generated_skill.filename += ".py"
-            safe_filename = os.path.basename(generated_skill.filename)
-            if "/" in safe_filename or "\\" in safe_filename:
-                logger.error(f"SkillCreator: Rejected unsafe filename: {generated_skill.filename}")
-                return False
-
+            # 5. Filename safety: sanitize rather than reject. Prefer the
+            #    LLM-provided basename; fall back to the class name so a bad
+            #    filename alone never kills an otherwise valid skill.
+            safe_filename = self._sanitize_filename(skill_data.filename, skill_data.class_name)
+            if safe_filename is None:
+                feedback = "Invalid filename. Use a simple snake_case name ending with '_skill.py'."
+                continue
             filepath = os.path.join(self.skills_dir, safe_filename)
 
             # 6. Ratchet: capture old content + compute scores BEFORE writing.
@@ -158,21 +176,28 @@ class SkillCreator:
                     logger.warning(f"SkillCreator: failed to read previous skill file {filepath}: {e}")
                     old_code = ""
 
-            new_score = self.evaluator.evaluate_code_quality(generated_skill.code)
+            new_score = self.evaluator.evaluate_code_quality(skill_data.code)
             old_score = self.evaluator.evaluate_code_quality(old_code) if old_code else 0.0
             if new_score < old_score:
                 logger.warning(
                     f"SkillCreator: Ratchet check failed - new score ({new_score}) < old score ({old_score}). "
                     f"Not writing {safe_filename}."
                 )
-                return False
+                feedback = (
+                    f"RATCHET REJECTED: quality score {new_score} < existing {old_score}. "
+                    "Provide complete name/description/expected_args/expected_response_type/execute "
+                    "members, error handling and no dangerous calls."
+                )
+                continue
 
-            # 7. Write the new code to the file
+            # 7. Write the new code to the file (archiving the old version first
+            #    so the ratchet's replacements keep a fossil record).
             try:
-                # Make sure the skills directory exists
                 os.makedirs(self.skills_dir, exist_ok=True)
+                if file_existed and old_code and old_code != skill_data.code:
+                    self._archive_file(safe_filename, old_code)
                 with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(generated_skill.code)
+                    f.write(skill_data.code)
             except OSError as e:
                 logger.error(f"SkillCreator: failed to write skill file {filepath}: {e}")
                 return False
@@ -181,20 +206,218 @@ class SkillCreator:
             #    top-level statements were verified to contain no function calls.
             real_skill_name = self._load_skill_name(filepath, safe_filename)
             if real_skill_name is None:
-                # Load failed: roll back to the previous content
+                # Load failed: roll back to the previous content, then let the
+                # next Voyager round repair the code with the load error.
                 logger.warning(f"SkillCreator: failed to load generated skill from {filepath}; rolling back.")
                 self._restore_file(filepath, file_existed, old_code)
-                return False
+                feedback = "The generated module raised an exception while being imported. Fix the code so it imports cleanly."
+                continue
 
             # 9. Register the new skill under its real name
             self.registry.register(real_skill_name, f"Auto-generated skill for: {intent}")
 
-            logger.info(f"SkillCreator: Successfully created {safe_filename} (skill name: {real_skill_name})")
+            logger.info(f"SkillCreator: Successfully created {safe_filename} (skill name: {real_skill_name}, attempt {attempt})")
             return True
 
+        logger.error(f"SkillCreator: generation failed after {self.config.generate_max_attempts} attempts.")
+        return False
+
+    async def repair_skill(self, skill_name: str, error: str) -> bool:
+        """
+        Self-healing (Voyager-style environment feedback): when a skill fails
+        repeatedly at runtime, ask the LLM to fix the existing code, passing
+        the actual execution error as context. The ratchet still gates the
+        replacement (the repaired version must not score lower than the
+        current one) and the previous version is archived.
+        """
+        skill_file = self._find_skill_file(skill_name)
+        if skill_file is None:
+            logger.warning(f"SkillCreator: repair requested for unknown skill '{skill_name}'")
+            return False
+        try:
+            with open(skill_file, "r", encoding="utf-8") as f:
+                current_code = f.read()
+        except OSError as e:
+            logger.error(f"SkillCreator: cannot read {skill_file} for repair: {e}")
+            return False
+
+        old_score = self.evaluator.evaluate_code_quality(current_code)
+
+        system_prompt = (
+            "You are a master Python software engineer repairing a broken skill in the "
+            "Synapse AI agent architecture. The skill below failed at runtime. Fix the bug "
+            "while KEEPING the same skill `name`, the same argument model fields, and the "
+            "same response model fields so callers are not broken. Rules:\n"
+            "1. Return a complete Python file.\n"
+            "2. Keep Pydantic models for arguments and response, and a BaseSkill subclass.\n"
+            "3. Improve error handling so transient failures return an `error` field instead of raising.\n"
+            "4. Respond with JSON containing 'filename', 'class_name', and 'code' matching the GeneratedSkill schema. No markdown."
+        )
+        user_prompt = (
+            f"Runtime error:\n{error}\n\n"
+            f"Current code:\n```python\n{current_code}\n```"
+        )
+
+        try:
+            response = await with_retries(
+                lambda: self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    response_format={"type": "json_object"},
+                ),
+                attempts=self.config.app_retries,
+            )
+            skill_data = GeneratedSkill(**json.loads(response.choices[0].message.content))
+        except Exception as e:
+            logger.error(f"SkillCreator: repair LLM call failed for '{skill_name}': {e}")
+            return False
+
+        # Validation gates (same as generation).
+        try:
+            ast.parse(skill_data.code)
+        except SyntaxError as e:
+            logger.error(f"SkillCreator: repaired code has syntax errors: {e}")
+            return False
+        if self._check_top_level_safety(skill_data.code) is not None:
+            logger.error("SkillCreator: repaired code rejected by top-level safety check")
+            return False
+        if self.evaluator.check_antipattern_ast(skill_data.code) <= 0.0:
+            logger.error("SkillCreator: repaired code rejected by antipattern scan")
+            return False
+        new_score = self.evaluator.evaluate_code_quality(skill_data.code)
+        if new_score < old_score:
+            logger.warning(
+                f"SkillCreator: ratchet rejected repair of '{skill_name}' ({new_score} < {old_score})"
+            )
+            return False
+
+        safe_filename = self._sanitize_filename(skill_data.filename, skill_data.class_name) or os.path.basename(skill_file)
+        filepath = os.path.join(self.skills_dir, safe_filename)
+        try:
+            self._archive_file(os.path.basename(skill_file), current_code)
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(skill_data.code)
+        except OSError as e:
+            logger.error(f"SkillCreator: failed to write repaired skill: {e}")
+            return False
+
+        loaded_name = self._load_skill_name(filepath, safe_filename)
+        if loaded_name is None:
+            logger.error(f"SkillCreator: repaired skill failed to load; rolling back '{skill_name}'.")
+            self._restore_file(filepath, True, current_code)
+            return False
+
+        logger.info(f"SkillCreator: successfully repaired '{skill_name}' -> {safe_filename}")
+        return True
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    async def _request_skill_json(self, intent: str, requirements: str, feedback: str) -> Optional[GeneratedSkill]:
+        """One LLM round-trip. When ``feedback`` is non-empty (a previous
+        attempt failed validation), it is injected so the model can repair
+        its own output."""
+        system_prompt = (
+            "You are a master Python software engineer working on the Synapse AI agent architecture. "
+            "Your task is to create a new skill to satisfy the user's intent. "
+            "The new skill MUST STRICTLY follow these rules:\n"
+            "1. It must be a complete Python file.\n"
+            "2. It must define Pydantic models for both arguments and response (e.g., `MyArgs`, `MyResponse`).\n"
+            "3. It must define a class that inherits from `core.base.BaseSkill`.\n"
+            "4. The class must implement `name`, `description`, `expected_args`, and `expected_response_type` as @property.\n"
+            "5. The class must implement `async def execute(self, **kwargs) -> BaseModel` with try/except error handling.\n"
+            "6. Top-level code may only contain imports, class definitions and constants — no executable statements.\n"
+            "7. Never use eval/exec/os.system/subprocess or similar dangerous calls.\n"
+            "8. The description must end with 'Trigger words: word1, word2, ...' listing when to use this skill.\n"
+            "9. You must provide a JSON response containing 'filename', 'class_name', and 'code' conforming to the GeneratedSkill schema.\n"
+            "Do not return markdown, only the raw JSON string matching the GeneratedSkill schema."
+        )
+        user_prompt = f"Intent: {intent}\nRequirements: {requirements}"
+        if feedback:
+            user_prompt += f"\n\nYour previous attempt was rejected:\n{feedback}\nFix these problems and return the complete corrected JSON."
+
+        try:
+            response = await with_retries(
+                lambda: self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    response_format={"type": "json_object"},
+                ),
+                attempts=self.config.app_retries,
+            )
+            content = response.choices[0].message.content
+            return GeneratedSkill(**json.loads(content))
         except Exception as e:
             logger.error(f"SkillCreator: Failed to generate skill: {e}")
-            return False
+            return None
+
+    @staticmethod
+    def _sanitize_filename(filename: str, class_name: str = "") -> Optional[str]:
+        """Return a safe basename ending in .py, or None if impossible."""
+        name = os.path.basename((filename or "").strip())
+        if name in ("", ".", "..") or "/" in name or "\\" in name or name.startswith("."):
+            # Fall back to a snake_case name derived from the class name.
+            snake = re.sub(r"(?<!^)(?=[A-Z])", "_", class_name or "").lower()
+            snake = re.sub(r"[^a-z0-9_]", "", snake).strip("_")
+            name = f"{snake or 'generated'}_skill.py"
+        if not name.endswith(".py"):
+            name += ".py"
+        if not re.fullmatch(r"[A-Za-z0-9_\-]+\.py", name):
+            return None
+        return name
+
+    def _archive_file(self, filename: str, code: str) -> None:
+        """Store a timestamped copy of ``code`` under skills/.archive/<stem>/."""
+        try:
+            stem = filename[:-3] if filename.endswith(".py") else filename
+            dest_dir = os.path.join(self.archive_dir, stem)
+            os.makedirs(dest_dir, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            dest = os.path.join(dest_dir, f"{stamp}_{stem}.py")
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(code)
+            logger.info(f"SkillCreator: archived previous version of '{filename}' -> {dest}")
+        except OSError as e:
+            logger.warning(f"SkillCreator: failed to archive '{filename}': {e}")
+
+    def _find_skill_file(self, skill_name: str) -> Optional[str]:
+        """Locate the source file whose BaseSkill subclass has `name == skill_name`."""
+        direct = os.path.join(self.skills_dir, f"{skill_name}.py")
+        if os.path.isfile(direct):
+            return direct
+        if not os.path.isdir(self.skills_dir):
+            return None
+        for filename in os.listdir(self.skills_dir):
+            if not filename.endswith(".py") or filename == "__init__.py":
+                continue
+            filepath = os.path.join(self.skills_dir, filename)
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    tree = ast.parse(f.read())
+            except (OSError, SyntaxError):
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                if any(
+                    (isinstance(b, ast.Name) and b.id == "BaseSkill")
+                    or (isinstance(b, ast.Attribute) and b.attr == "BaseSkill")
+                    for b in node.bases
+                ):
+                    for item in node.body:
+                        if isinstance(item, ast.FunctionDef) and item.name == "name":
+                            for stmt in item.body:
+                                if isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Constant):
+                                    if stmt.value.value == skill_name:
+                                        return filepath
+        return None
 
     @staticmethod
     def _load_skill_name(filepath: str, safe_filename: str) -> Optional[str]:

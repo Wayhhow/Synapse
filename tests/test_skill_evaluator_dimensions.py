@@ -12,7 +12,6 @@ Covers:
 """
 import os
 
-import pytest
 
 from core.skill_registry import SkillRegistry
 from meta.skill_evaluator import SkillEvaluator

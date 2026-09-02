@@ -17,7 +17,6 @@ import json
 import os
 import threading
 
-import pytest
 
 from core.skill_registry import SkillRegistry
 

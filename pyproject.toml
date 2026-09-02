@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "synapse-agent"
+version = "2.0.0"
+description = "A self-evolving AI agent framework — when the agent can't do something, it writes the code to learn it."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Wayhhow" }]
+requires-python = ">=3.10"
+keywords = ["ai-agent", "meta-evolution", "skill-library", "llm", "autonomous-agents"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "pydantic>=2.0.0",
+    "httpx>=0.24.0",
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
+    "duckduckgo-search>=4.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.4.0",
+]
+
+[project.scripts]
+synapse = "cli:main_sync"
+
+[tool.setuptools]
+py-modules = ["cli"]
+packages = ["core", "router", "meta", "skills", "web"]
+
+[tool.setuptools.package-data]
+web = ["static/*"]
+
+[tool.pytest.ini_options]
+pythonpath = "."
+asyncio_mode = "strict"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["skills/.archive", "exported_skills"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",  # line length handled by formatter; legacy lines vary
+    "B008",  # FastAPI Depends pattern
+]

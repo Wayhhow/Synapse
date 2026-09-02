@@ -1,7 +1,7 @@
 import json
 import statistics
 from pydantic import BaseModel, Field
-from typing import Type, Optional, List, Union
+from typing import Type, Optional, List
 from core.base import BaseSkill
 
 

@@ -15,7 +15,6 @@ import time
 
 import pytest
 from pydantic import BaseModel
-from typing import Type
 
 from core.base import BaseSkill
 from core.sandbox import Sandbox, SandboxResult

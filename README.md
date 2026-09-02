@@ -2,13 +2,15 @@
 
 # 🧠 Synapse
 
-**自进化 AI Agent 架构 — 当 Agent 遇到不会的事，它会自己写代码学会**
+**自进化 AI Agent 框架 — 当 Agent 遇到不会的事，它会自己写代码学会**
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![OpenAI Powered](https://img.shields.io/badge/Powered%20by-OpenAI-412991?logo=openai&logoColor=white)](https://openai.com)
+[![CI](https://github.com/Wayhhow/Synapse/actions/workflows/ci.yml/badge.svg)](https://github.com/Wayhhow/Synapse/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-141%20passing-brightgreen)](#测试)
+[![Agent Skills](https://img.shields.io/badge/SKILL.md-standard-8A2BE2)](https://agentskills.io)
 
-[English](#english) · [快速开始](#快速开始) · [架构](#架构) · [技能列表](#技能列表) · [Web UI](#web-ui) · [设计哲学](#设计哲学)
+[English](#english) · [快速开始](#快速开始) · [架构](#架构) · [配置](#配置) · [设计哲学](#设计哲学)
 
 </div>
 
@@ -16,38 +18,133 @@
 
 > *"如果 Agent 遇到一个它不会的任务，它不应该说'我做不到'——它应该说'等我一下，我去学一下'。"*
 
-Synapse 是一个**自进化（Meta-Evolution）AI Agent 框架**。当用户请求超出当前技能范围时，Synapse 会调用 LLM 自动生成新的 Python 技能文件，加载后立即执行——**Agent 在运行时自己教自己新能力**。
+Synapse 是一个**自进化（Meta-Evolution）AI Agent 框架**。它以 ReAct 式 Agent 循环驱动：每一轮 LLM 可以调用技能（tool），执行结果回灌到上下文继续推理；当没有技能能处理请求时，Synapse 调用 LLM 现场生成新的 Python 技能文件、验证、加载并立即投入执行——**Agent 在运行时自己教自己新能力，坏了还会自己修**。
 
 ## 核心循环
 
 ```mermaid
 flowchart LR
-    U[👤 用户] -->|提问| R[🔀 SkillRouter]
-    R -->|匹配技能| S[⚡ 执行技能]
-    R -->|无匹配技能| M[🧬 Meta-Evolution]
-    M -->|LLM 生成代码| N[📝 新技能文件]
-    N -->|自动加载| R
-    R -->|重试| S
-    S -->|结果| U
+    U[👤 用户] --> A{🤖 Agent Loop<br/>ReAct}
+    A -->|选择技能| S[⚡ 执行技能]
+    S -->|结果回灌| A
+    A -->|无技能可用| M[🧬 Meta-Evolution<br/>LLM 生成代码]
+    M -->|验证 + 棘轮| N[📝 新技能上线]
+    N -->|工具表刷新| A
+    A -->|最终回答| U
+    S -->|连续失败 N 次| H[🔧 自愈修复<br/>带错误上下文重新生成]
+    H -->|棘轮通过| S
 
+    style A fill:#0f3460,color:#fff
     style M fill:#e94560,color:#fff
-    style N fill:#0f3460,color:#fff
+    style H fill:#b23a48,color:#fff
     style S fill:#16213e,color:#fff
 ```
 
-## 为什么做这个
+与 v1 的"单发路由"不同，v2 的 Agent 循环（借鉴 [OpenManus](https://github.com/FoundationAgents/OpenManus) 的 ReAct 架构）意味着：LLM 看得到每次工具执行的真实结果，可以在一步里调用多个工具、组合信息、对失败做出反应，最后给出自然语言的最终回答。
 
-现有的 Agent 框架（AutoGPT、LangChain Agents 等）都是**静态技能集**——开发者预定义了哪些工具，Agent 就只能用哪些工具。如果用户想要一个不存在的功能，Agent 只能说"我做不到"。
+## 六大机制
 
-Synapse 的核心理念是：**Agent 应该和生物神经系统一样，能够根据刺激生长新的突触连接（Synapse）。**
+### 1️⃣ Agent 循环（ReAct）
 
-| 传统 Agent | Synapse |
-|-----------|---------|
-| 预定义技能集，用不了就报错 | 运行时自动生成新技能 |
-| 开发者手动添加工具 | LLM 自动编写工具代码 |
-| 技能坏了只能等更新 | 棘轮机制自动修复低质量技能 |
-| 无对话记忆 | 内置 session 记忆系统 |
-| 技能直接在主进程执行 | 进程级沙箱隔离 |
+每条查询最多 `SYNAPSE_MAX_STEPS`（默认 5）轮 LLM 推理。工具结果以 `tool` 消息回灌，LLM 决定继续调用工具还是作答；单轮多工具调用全部执行；`SYNAPSE_MAX_STEPS=1` 可回退到 v1 单发行为（直接返回技能的结构化结果）。
+
+### 2️⃣ Meta-Evolution — 运行时技能生成
+
+没有技能能处理时，LLM 生成完整的 Python 技能文件（Pydantic 参数/响应模型 + `BaseSkill` 子类），经过四道关卡后自动加载执行：
+
+| 关卡 | 拦截内容 |
+|------|---------|
+| 语法检查 | AST parse 失败 |
+| 顶层安全检查 | `import` 即执行的调用（`os.system(...)` 等）——加载前拒绝（Bug-1 修复） |
+| 反模式 AST 扫描 | `eval` / `exec` / `subprocess` / 文件删除等危险调用，含 `getattr(builtins, "eval")` 式混淆（Bug-28 修复） |
+| 重复检测 | 与现有技能描述 Jaccard ≥ 0.5 视为重复，不再生成 |
+
+### 3️⃣ Voyager 式迭代修复（v2 新增）
+
+借鉴 [Voyager](https://arxiv.org/abs/2305.16291) 的"迭代提示机制"：技能生成不是一次性赌博。生成 → 验证 → **把具体错误（语法/安全/棘轮/加载异常）回灌给 LLM 修复重试**，最多 `SYNAPSE_GENERATE_MAX_ATTEMPTS`（默认 3）轮。运行期同样：技能**连续失败 ≥ 3 次**自动触发 `repair_skill`——把真实执行错误连同源码交给 LLM 修复，棘轮把关，旧版本自动归档。
+
+### 4️⃣ 棘轮机制（Ratchet）
+
+```mermaid
+flowchart LR
+    A[新版本代码] --> B{新评分 ≥ 旧评分?}
+    B -->|是| C[✅ 替换 + 旧版归档<br/>skills/.archive/]
+    B -->|否| D[❌ 保留旧版本<br/>错误信息回灌重试]
+
+    style C fill:#4CAF50,color:#fff
+    style D fill:#f44336,color:#fff
+```
+
+5 维度健康度评估（结构 20 / 成功率 30 / 错误处理 20 / 触发词具体性 15 / 反模式 15）。分数只升不降；被替换的旧技能进入 `skills/.archive/<技能名>/` 时间戳归档，进化留下化石记录。
+
+### 5️⃣ 分层记忆（v2 增强）
+
+- 短期：每 session 最近 N 轮 FIFO（`SYNAPSE_MEMORY_MAX_HISTORY`，默认 10 轮）
+- 滚动摘要（借鉴 [mem0](https://github.com/mem0ai/mem0) / [Letta](https://github.com/letta-ai/letta) 的分层思路）：配置 API Key 后，被挤出的历史自动压缩为摘要，随每轮上下文前置注入；无 Key 时优雅降级为纯 FIFO
+- JSON 原子写入 + `RLock` 并发安全，摘要持久化到独立 sidecar 文件（主文件格式向后兼容）
+
+### 6️⃣ 全链路追踪（v2 新增）
+
+每条查询一条 JSONL 记录（`data/traces.jsonl`）：每轮 LLM 耗时、每个技能执行成败、最终结局。`GET /traces` 直接读取最近记录，`tail -f` 即可实时观察 Agent 行为——本地版的 LangSmith。
+
+## 多 Provider 支持（v2 新增）
+
+任何 OpenAI 兼容端点开箱即用（借鉴 OpenManus 的 provider 无关设计）：
+
+```bash
+# DeepSeek
+SYNAPSE_LLM_BASE_URL=https://api.deepseek.com/v1
+SYNAPSE_MODEL=deepseek-chat
+
+# OpenRouter / Qwen / GLM / Ollama 本地模型 同理
+```
+
+LLM 调用内置两层韧性：OpenAI SDK 传输层重试 + 应用层指数退避重试（限流/超时/5xx）。
+
+## 快速开始
+
+### 1. 安装
+
+```bash
+git clone https://github.com/Wayhhow/Synapse.git
+cd Synapse
+pip install -r requirements.txt
+# 或者 pip install -e . 后使用 `synapse` 命令
+```
+
+### 2. 配置
+
+```bash
+cp .env.example .env
+# 编辑 .env，填入 OPENAI_API_KEY（可选配置 SYNAPSE_LLM_BASE_URL 切换供应商）
+```
+
+### 3. 启动
+
+```bash
+python cli.py                      # CLI（支持 /skills /stats /history /clear /export 命令）
+# 或
+uvicorn web.app:app --reload       # Web UI（SSE 流式输出 + 技能面板 + 健康度仪表）
+```
+
+### 4. 试试这些
+
+```
+> 北京天气怎么样？
+> 计算 (2 + 3) * 4 ** 2
+> 分析这组数据: 23, 45, 12, 67, 34, 89, 56
+> 帮我查一下苹果公司的股价    ← 触发 Meta-Evolution，现场写一个股票技能！
+```
+
+CLI 专属命令：`/help` `/skills` `/stats` `/history` `/clear` `/export [dir]` `/exit`
+
+### 5. 导出为 Agent Skills 标准格式
+
+```bash
+python cli.py --export ./my_skills
+```
+
+每个技能导出为 [Agent Skills 开放标准](https://agentskills.io)（Anthropic 2025 年 10 月推出、2025 年 12 月开放标准化的 `SKILL.md` 格式）目录：`SKILL.md`（YAML frontmatter + 使用文档）+ `skill.py`（可执行源码）。Synapse 自动生成的技能可即刻被 Claude Code、Cursor、Codex CLI 等 20+ 生态工具识别。
 
 ## 架构
 
@@ -55,201 +152,95 @@ Synapse 的核心理念是：**Agent 应该和生物神经系统一样，能够�
 graph TB
     subgraph Core["核心层"]
         BS[BaseSkill<br/>技能抽象基类]
-        MM[Memory<br/>对话记忆]
-        SB[Sandbox<br/>执行沙箱]
-        SR[SkillRegistry<br/>技能注册表]
+        MM[Memory<br/>FIFO + 滚动摘要]
+        SB[Sandbox<br/>进程级隔离]
+        SR[SkillRegistry<br/>统计 + 连败追踪]
+        CF[Config<br/>环境变量配置]
+        RS[Resilience<br/>指数退避重试]
+        TR[Tracer<br/>JSONL 追踪]
     end
 
-    subgraph Router["路由层"]
-        SKR[SkillRouter<br/>LLM 智能路由]
+    subgraph Router["Agent 层"]
+        SKR[SkillRouter<br/>ReAct 循环 + 多工具 + 自愈]
     end
 
     subgraph Meta["自进化层"]
-        SC[SkillCreator<br/>Meta-Evolution]
-        SE[SkillEvaluator<br/>5维评估]
+        SC[SkillCreator<br/>生成 + Voyager 修复]
+        SE[SkillEvaluator<br/>5 维评估 + 棘轮]
+        SPE[SkillExporter<br/>SKILL.md 标准]
     end
 
-    subgraph Skills["技能层"]
-        WS[WebSearch<br/>DuckDuckGo]
-        DA[DataAnalysis<br/>本地统计]
-        CL[Calculator<br/>AST安全计算]
-        TR[Translation<br/>MyMemory]
-        NS[News<br/>Google RSS]
-        WT[Weather<br/>Open-Meteo]
+    subgraph Skills["技能层（自动发现）"]
+        WS[WebSearch]
+        DA[DataAnalysis]
+        CL[Calculator]
+        TR2[Translation]
+        NS[News]
+        WT[Weather]
     end
 
     subgraph Web["接口层"]
-        CLI[CLI<br/>命令行]
-        API[FastAPI<br/>Web UI]
+        CLI[CLI<br/>斜杠命令]
+        API[FastAPI<br/>SSE 流式 + REST]
     end
 
-    SKR --> BS
-    SKR --> MM
-    SKR --> SB
-    SKR --> SR
-    SKR --> SC
-    SR --> SE
+    SKR --> CF & RS & TR
+    SKR --> BS & MM & SB & SR
+    SKR --> SC & SE
     SC --> SE
-
-    CLI --> SKR
-    API --> SKR
-
-    WS -.-> BS
-    DA -.-> BS
-    CL -.-> BS
-    TR -.-> BS
-    NS -.-> BS
-    WT -.-> BS
+    CLI & API --> SKR
 
     style Meta fill:#e94560,color:#fff
     style Core fill:#0f3460,color:#fff
-    style Skills fill:#16213e,color:#fff
-    style Web fill:#533483,color:#fff
+    style Router fill:#16213e,color:#fff
 ```
 
-## 技能列表
+## 内置技能
 
-所有技能**开箱即用**，无需额外 API Key（除 OpenAI 外）：
+所有技能**开箱即用**，无需额外 API Key（除 LLM 外）：
 
-| 技能 | 说明 | 依赖 | 需要 Key? |
-|------|------|------|----------|
-| 🔍 **WebSearch** | DuckDuckGo 互联网搜索 | `duckduckgo-search` | ❌ |
-| 📊 **DataAnalysis** | 描述性统计分析（均值/中位数/标准差） | `statistics`（标准库） | ❌ |
-| 🧮 **Calculator** | 安全数学表达式计算（AST 白名单） | `ast`（标准库） | ❌ |
-| 🌐 **Translation** | 文本翻译 | MyMemory API | ❌ |
-| 📰 **News** | 新闻查询 | Google News RSS | ❌ |
-| 🌤️ **Weather** | 天气查询 | Open-Meteo API | ❌ |
-| 🧬 **Auto-Generated** | 由 Meta-Evolution 自动生成的技能 | 视情况而定 | 视情况而定 |
+| 技能 | 说明 | 需要 Key? |
+|------|------|----------|
+| 🔍 **WebSearch** | DuckDuckGo 互联网搜索 | ❌ |
+| 📊 **DataAnalysis** | 描述性统计（均值/中位数/标准差） | ❌ |
+| 🧮 **Calculator** | AST 白名单安全数学计算 | ❌ |
+| 🌐 **Translation** | MyMemory 文本翻译 | ❌ |
+| 📰 **News** | Google News RSS | ❌ |
+| 🌤️ **Weather** | Open-Meteo 天气 + 地理编码 | ❌ |
+| 🧬 **Auto-Generated** | Meta-Evolution 运行时生成的技能 | 视情况 |
 
-## 自进化机制
+## 配置
 
-借鉴 [darwin-skill](https://github.com/alchaincyf/darwin-skill) 的评估体系和微软 [SkillLens](https://arxiv.org/abs/2605.23899) 论文的实证 rubric 设计：
+全部通过环境变量（见 [.env.example](.env.example)），零配置文件依赖：
 
-### 5 维度技能健康度评估（满分 100）
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `OPENAI_API_KEY` | — | LLM 密钥 |
+| `SYNAPSE_LLM_BASE_URL` | OpenAI 官方 | 任何 OpenAI 兼容端点 |
+| `SYNAPSE_MODEL` | `gpt-4o-mini` | 模型名 |
+| `SYNAPSE_MAX_STEPS` | `5` | Agent 循环最大轮数（1 = 单发模式） |
+| `SYNAPSE_GENERATE_MAX_ATTEMPTS` | `3` | 技能生成的迭代修复轮数 |
+| `SYNAPSE_AUTO_REPAIR` | `1` | 连续失败自动修复开关 |
+| `SYNAPSE_AUTO_REPAIR_THRESHOLD` | `3` | 触发自愈的连败次数 |
+| `SYNAPSE_SANDBOX_TIMEOUT` | `10` | 沙箱超时（秒） |
+| `SYNAPSE_MEMORY_MAX_HISTORY` | `10` | 短期记忆轮数 |
+| `SYNAPSE_TRACE` | `1` | JSONL 追踪开关 |
 
-| 维度 | 权重 | 说明 |
-|------|------|------|
-| **结构质量** | 20 | 是否有完整的 name/description/args/response |
-| **执行成功率** | 30 | success_count / total_count |
-| **错误处理** | 20 | 是否有 error 字段和 fallback |
-| **具体性** | 15 | description 是否包含触发词 |
-| **反模式检测** | 15 | 是否包含危险操作黑名单 |
+## Web API
 
-### 棘轮机制（Ratchet）
-
-```mermaid
-flowchart LR
-    A[技能评分低] --> B[触发 Meta-Evolution]
-    B --> C[生成新版本]
-    C --> D{新评分 > 旧评分?}
-    D -->|是| E[✅ 替换为新版本]
-    D -->|否| F[❌ 保留旧版本<br/>丢弃新版本]
-
-    style E fill:#4CAF50,color:#fff
-    style F fill:#f44336,color:#fff
-```
-
-分数只升不降。每一轮要么改进技能，要么干净地丢弃。不会随时间积累局部退化。
-
-## 安全机制
-
-### 进程级沙箱
-
-Meta-Evolution 生成的代码在独立子进程中执行：
-
-```mermaid
-flowchart LR
-    A[SkillRouter] -->|use_sandbox=True| B[Sandbox]
-    B -->|multiprocessing.Process| C[子进程执行]
-    C -->|Queue 返回结果| B
-    B -->|结果| A
-    C -->|超时10秒| D[⛔ terminate → kill]
-
-    style D fill:#f44336,color:#fff
-    style B fill:#0f3460,color:#fff
-```
-
-- ✅ 技能异常不影响主进程（`multiprocessing.Process` 隔离）
-- ✅ 10 秒超时自动终止；若 `terminate()` 1 秒后仍存活，升级为 `kill()` (SIGKILL) 防僵尸进程
-- ✅ `Sandbox.execute_async` 通过 `run_in_executor` 在后台线程执行，不阻塞 FastAPI 事件循环
-- ✅ 显式关闭 `Queue` 防 fd 泄漏
-- ✅ `use_sandbox` 开关可关闭（开发调试用）
-
-### 文件名安全
-
-LLM 生成的文件名经过严格校验：
-- `os.path.basename()` 提取纯文件名
-- 拒绝包含 `/` 或 `\\` 的路径
-- 保留连字符 `-`（如 `crypto-price-skill.py`）
-
-## 对话记忆
-
-支持多轮对话上下文，Agent 能记住之前聊过什么：
-
-```
-用户: 北京天气怎么样？
-Agent: 北京目前晴朗，气温 28°C。
-
-用户: 那上海呢？
-Agent: 上海目前多云，气温 25°C。  ← Agent 理解"那上海呢"是指天气
-```
-
-- 按 `session_id` 隔离不同会话
-- 限制最近 10 轮历史，防止上下文溢出
-- JSON 文件持久化，重启不丢失
-
-## Web UI
-
-```bash
-uvicorn web.app:app --reload
-```
-
-打开 `http://localhost:8000` 即可使用暗色主题聊天界面。
-
-## 快速开始
-
-### 1. 安装依赖
-
-```bash
-pip install -r requirements.txt
-```
-
-### 2. 配置环境变量
-
-```bash
-cp .env.example .env
-# 编辑 .env，填入你的 OPENAI_API_KEY
-```
-
-### 3. 启动 CLI
-
-```bash
-python cli.py
-```
-
-### 4. 或启动 Web UI
-
-```bash
-uvicorn web.app:app --reload
-```
-
-### 5. 试试这些
-
-```
-> 北京天气怎么样？
-> 帮我搜索 Python asyncio 最佳实践
-> 分析这组数据: 23, 45, 12, 67, 34, 89, 56
-> 计算 (2 + 3) * 4 ** 2
-> 把 "Hello World" 翻译成中文
-> 最新科技新闻
-> 帮我查一下苹果公司的股价    ← 触发 Meta-Evolution，自动生成股票技能！
-```
+| 端点 | 说明 |
+|------|------|
+| `POST /chat` | 同步对话，返回最终回答 + 技能归属 |
+| `POST /chat/stream` | **SSE 流式**：逐事件推送推理/工具执行/最终回答 |
+| `GET /skills` | 当前技能清单（含运行时生成的） |
+| `GET /stats` | 5 维健康度报告 |
+| `GET /traces` | 最近 N 条执行追踪 |
+| `GET /history/{id}` · `DELETE /history/{id}` | 会话记忆读取/清除 |
+| `GET /health` | 健康检查 |
 
 ## 如何写一个新技能
 
-1. 在 `skills/` 目录创建 Python 文件
-2. 继承 `BaseSkill`，实现 4 个属性 + 1 个方法
-3. 保存后自动发现，无需手动注册
+在 `skills/` 目录创建 Python 文件，继承 `BaseSkill`，保存即自动发现：
 
 ```python
 from pydantic import BaseModel, Field
@@ -270,7 +261,7 @@ class MySkill(BaseSkill):
 
     @property
     def description(self) -> str:
-        return "做什么事。触发词：xxx, yyy, zzz"
+        return "做什么事。触发词：xxx, yyy, zzz"  # 触发词影响 dim4 评分
 
     @property
     def expected_args(self) -> Type[BaseModel]:
@@ -288,83 +279,66 @@ class MySkill(BaseSkill):
             return MyResponse(result="", error=str(e))
 ```
 
-## 项目结构
+## 测试
 
+```bash
+pip install -r requirements.txt pytest pytest-asyncio
+pytest -q          # 141 个测试，覆盖 Agent 循环 / 自愈 / 棘轮 / 沙箱 / 记忆 / 追踪 / 导出
+ruff check .       # Lint（CI 强制）
 ```
-Synapse/
-├── core/                    # 核心层
-│   ├── base.py              # BaseSkill 抽象基类
-│   ├── memory.py            # 对话记忆（session 管理 + JSON 持久化）
-│   ├── sandbox.py           # 进程级沙箱隔离
-│   └── skill_registry.py    # 技能注册表（执行统计 + 健康度）
-├── router/
-│   └── router.py            # LLM 智能路由 + 记忆注入 + 沙箱执行
-├── meta/                    # 自进化层
-│   ├── skill_creator.py     # Meta-Evolution（LLM 自动生成技能）
-│   └── skill_evaluator.py   # 5 维度技能评估 + 棘轮机制
-├── skills/                  # 技能库（自动发现）
-│   ├── web_search_skill.py  # 🔍 DuckDuckGo 搜索
-│   ├── data_analysis_skill.py # 📊 本地统计分析
-│   ├── calculator_skill.py  # 🧮 安全数学计算
-│   ├── translation_skill.py # 🌐 文本翻译
-│   ├── news_skill.py        # 📰 新闻查询
-│   └── weather_skill.py     # 🌤️ 天气查询
-├── web/                     # Web UI
-│   ├── app.py               # FastAPI 后端
-│   └── static/              # 前端（暗色主题聊天界面）
-├── cli.py                   # CLI 入口
-├── tests/                   # 测试
-└── requirements.txt
-```
+
+CI 在 GitHub Actions 上跑 Ubuntu + Windows × Python 3.10–3.13 的完整矩阵。
 
 ## 设计哲学
 
-### 五条核心原则
-
 | # | 原则 | 说明 |
 |---|------|------|
-| 01 | **自动优于手动** | 技能自动发现、自动生成、自动评估、自动修复 |
-| 02 | **棘轮不倒退** | 技能评分只升不降，新版本必须优于旧版本 |
-| 03 | **隔离保安全** | LLM 生成的代码在沙箱中执行，异常不影响主进程 |
-| 04 | **记忆即上下文** | Agent 记住对话历史，支持追问和上下文理解 |
-| 05 | **零额外 Key** | 除 OpenAI 外，所有技能使用免费 API，无需额外 API Key |
+| 01 | **自动优于手动** | 技能自动发现、生成、评估、修复、归档 |
+| 02 | **棘轮不倒退** | 评分只升不降；每次替换都有化石记录 |
+| 03 | **反馈即燃料** | Voyager 式：错误信息回灌 LLM，自我修正 |
+| 04 | **隔离保安全** | 生成代码跑在进程沙箱；AST 关卡在加载前拦截 |
+| 05 | **记忆即上下文** | FIFO 短期 + 滚动摘要长期，重启不丢失 |
+| 06 | **零锁定** | OpenAI 兼容端点通吃；SKILL.md 标准互通；零额外 Key |
 
 ### 与相关项目的对比
 
 | 特性 | Synapse | AutoGPT | LangChain Agents | OpenManus |
 |------|---------|---------|-----------------|-----------|
+| ReAct Agent 循环 | ✅ | ✅ | ✅ | ✅ |
 | 运行时技能生成 | ✅ Meta-Evolution | ❌ | ❌ | ❌ |
-| 技能质量评估 | ✅ 5维评估 | ❌ | ❌ | ❌ |
-| 棘轮机制 | ✅ | ❌ | ❌ | ❌ |
-| 执行沙箱 | ✅ multiprocessing | ❌ | ❌ | ✅ Docker |
-| 对话记忆 | ✅ 内置 | ✅ | ✅ | ✅ |
-| 零额外 API Key | ✅ | ❌ | ❌ | ❌ |
-| Web UI | ✅ 内置 | ❌ | ❌ | ✅ |
+| 生成代码迭代修复 | ✅ Voyager 式 | ❌ | ❌ | ❌ |
+| 技能质量评估 + 棘轮 | ✅ 5 维 | ❌ | ❌ | ❌ |
+| 失败技能自愈 | ✅ 连败触发 | ❌ | ❌ | ❌ |
+| SKILL.md 标准导出 | ✅ | ❌ | ❌ | ❌ |
+| 执行追踪 | ✅ 本地 JSONL | ✅ 云服务 | ✅ LangSmith | ❌ |
+| 滚动记忆摘要 | ✅ 内置 | ✅ | ✅ | ❌ |
+| 零额外 API Key | ✅ | ❌ | 视实现 | ❌ |
 
 ## 已知限制
 
 诚实地列出当前的边界，方便使用者判断是否适合自己：
 
-- **沙箱是进程级而非容器级**：`multiprocessing.Process` 隔离了 GIL 和崩溃传播，但**不是**安全边界。Meta-Evolution 生成的代码在加载前会经过顶层 AST 安全检查 + 反模式扫描（堵住 `os.system` / `eval` / `subprocess` 等顶层调用），但若你需要在多租户/不可信环境部署，请额外套上 Docker/gVisor 等容器隔离。OpenManus 的 Docker 沙箱在这个维度更严格。
-- **依赖 OpenAI tool-calling**：技能路由通过 OpenAI Function Calling 决定，目前仅显式测试了 OpenAI API。接入 Anthropic / Gemini / Qwen 等兼容 OpenAI 协议的端点理论可行，但未做端到端验证。
-- **记忆是单 session FIFO**：当前 `Memory` 是按 `session_id` 隔离的最近 N 轮上下文（默认 10 轮 = 20 条消息），**不做** 语义抽取或跨 session 个性化。若需要长期记忆/向量检索，可替换 `router.memory` 为 mem0 或 LangGraph checkpointer（见 `synapse-memory/spec.md` 的 Decision Log）。
-- **Meta-Evolution 不是无中生有**：生成的技能质量受底层 LLM 能力影响。弱模型可能生成语法正确但语义错误的代码——这正是棘轮机制要兜底的场景，但兜底不等于万能。
-- **新闻技能仅返回标题+链接**：Google News RSS 不提供正文摘要；如需正文，需自行抓取或升级到带 API key 的服务。
-- **测试套件聚焦单元/集成**：当前 93 个测试覆盖核心组件与 Bug 修复回归，但**没有**端到端 LLM 真实调用的冒烟测试（避免 CI 烧 token）。生产部署前建议手动跑一次 `python cli.py` 验证真实链路。
+- **沙箱是进程级而非容器级**：`multiprocessing.Process` 隔离了崩溃传播，但**不是**安全边界。生成的代码在加载前经过顶层 AST 检查 + 反模式扫描，但多租户/不可信环境请额外套 Docker/gVisor。OpenManus 的 Docker 沙箱在这个维度更严格。
+- **自愈不是万能药**：`repair_skill` 依赖 LLM 理解真实执行错误；棘轮保证不会越修越差，但不保证一定修好。修不好时旧版本始终可用。
+- **滚动摘要是可选的**：需要 LLM 调用；无 Key 环境退化为纯 FIFO。摘要质量取决于模型能力，不保证无损。
+- **追踪是本地文件**：JSONL 适合单机调试，没有多租户/团队协作视图（那是 LangSmith/Langfuse 的领域）。
+- **Meta-Evolution 受限于底层 LLM**：弱模型可能生成语义错误的代码——棘轮 + 迭代修复兜底，但兜底不等于万能。
+- **测试聚焦单元/集成**：141 个测试全部 mock LLM（避免 CI 烧 token）；未包含真实 API 冒烟测试。生产部署前建议手动跑一次 `python cli.py` 验证真实链路。
 
 ## 致谢
 
-- **[darwin-skill](https://github.com/alchaincyf/darwin-skill)** — 多维度评估体系和棘轮机制的设计灵感来源（借鉴概念，未使用代码）
-- **[SkillLens](https://arxiv.org/abs/2605.23899)** (Microsoft Research, 2026) — 实证 rubric 设计；指出 25% 的 LLM 生成技能会产生 negative transfer，验证了我们做棘轮的必要性
-- **[SkillOpt](https://arxiv.org/abs/2605.23904)** (Microsoft Research, 2026) — validation-gated edits 框架；其 "textual learning rate + held-out gate" 思路与我们的棘轮机制异曲同工
-- **[SKILLAXE](https://arxiv.org/abs/2606.10546)** (Microsoft Research, 2026) — evaluation-guided self-refinement；4 维诊断(quality impact / trigger precision / instruction compliance / solution-path coverage)启发了我们的 dim4 具体性评估
+- **[Voyager](https://arxiv.org/abs/2305.16291)** (NVIDIA/Caltech 等, 2023) — 技能库 + 迭代提示机制的原始论文；Synapse 的生成-验证-修复循环直接受其启发
+- **[OpenManus](https://github.com/FoundationAgents/OpenManus)** — ReAct Agent 循环与 provider 无关配置的借鉴对象
+- **[mem0](https://github.com/mem0ai/mem0)** / **[Letta (MemGPT)](https://github.com/letta-ai/letta)** — 分层记忆设计的参照
+- **[Agent Skills 开放标准](https://agentskills.io)** (Anthropic) — SKILL.md 导出格式
+- **[darwin-skill](https://github.com/alchaincyf/darwin-skill)** — 多维度评估体系和棘轮机制的概念来源（借鉴概念，未使用代码）
 - **[autoresearch](https://github.com/karpathy/autoresearch)** (Karpathy) — 自主实验循环的原始灵感
 
 ---
 
 <div align="center">
 
-**Synapse — 当 Agent 遇到不会的事，它自己写代码学会。**
+**Synapse — 当 Agent 遇到不会的事，它自己写代码学会；写坏了，它自己修。**
 
 **Author**: Wayhhow · **License**: MIT
 
@@ -376,31 +350,32 @@ Synapse/
 
 ## English
 
-Synapse is a **self-evolving AI Agent framework**. When a user request falls outside the current skill set, Synapse invokes an LLM to automatically generate a new Python skill file, loads it, and executes it — **the Agent teaches itself new capabilities at runtime.**
+Synapse is a **self-evolving AI agent framework**. It runs a bounded ReAct-style agent loop: each round the LLM may call skills (tools), results are fed back as tool messages, and it continues until it can answer naturally. When no skill fits, Synapse generates a new Python skill at runtime — validates it, loads it, and uses it immediately. Failing skills are **automatically repaired** with their real execution errors fed back to the LLM (Voyager-style iterative refinement), gated by a ratchet so quality never regresses, with replaced versions archived as fossils.
 
 ### Quick Start
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env  # Add your OPENAI_API_KEY
-python cli.py          # CLI mode
-# OR
-uvicorn web.app:app --reload  # Web UI mode
+cp .env.example .env  # add OPENAI_API_KEY (optional: SYNAPSE_LLM_BASE_URL for DeepSeek/Qwen/GLM/Ollama/...)
+python cli.py                      # CLI with /skills /stats /export commands
+uvicorn web.app:app --reload       # Web UI: SSE streaming + skill panel
+python cli.py --export ./skills    # export as SKILL.md-standard folders
 ```
 
-### Key Features
+### Key Features (v2)
 
-- 🧬 **Meta-Evolution** — Auto-generates new skills when existing ones can't handle a request
-- 📊 **5-Dimension Skill Evaluation** — Structure, success rate, error handling, specificity, anti-patterns
-- 🔒 **Sandbox Execution** — LLM-generated code runs in isolated subprocesses (terminate → SIGKILL escalation, async-safe via `run_in_executor`)
-- 💬 **Conversation Memory** — Multi-turn context with session management (thread-safe `RLock` + atomic file writes)
-- 🔍 **6 Built-in Skills** — Web Search, Data Analysis, Calculator, Translation, News, Weather
-- 🌐 **Web UI** — Dark-themed chat interface via FastAPI
-- 🔑 **Zero Extra API Keys** — All skills use free APIs (except OpenAI)
+- 🔁 **Agentic loop** — multi-step reasoning with tool-result feedback; multi-tool turns; `SYNAPSE_MAX_STEPS=1` restores legacy single-shot routing
+- 🧬 **Meta-Evolution** — runtime skill generation behind four gates (syntax, top-level safety, AST antipattern scan, dedup)
+- 🔧 **Self-healing** — generation retries with validation feedback; runtime auto-repair after 3 consecutive failures; ratchet-gated with fossil archive
+- 🧠 **Layered memory** — per-session FIFO + LLM rolling summaries (graceful degradation without an API key)
+- 📡 **Any OpenAI-compatible provider** — DeepSeek/Qwen/GLM/OpenRouter/Ollama via `SYNAPSE_LLM_BASE_URL`, with two layers of retry resilience
+- 📈 **JSONL tracing** — one record per query (`/traces` endpoint included)
+- 📦 **SKILL.md export** — bridges every skill to the Agent Skills open standard (Claude Code, Cursor, Codex CLI, ...)
+- ✅ **141 tests** across agent loop, self-healing, ratchet, sandbox, memory, tracing and export; CI matrix (Ubuntu/Windows × Python 3.10–3.13) with ruff
 
 ### Known Limitations
 
 - Sandbox is process-level (not container-level) — add Docker/gVisor for untrusted multi-tenant use
-- Routing depends on OpenAI tool-calling protocol; Anthropic/Gemini/Qwen compatibility unverified end-to-end
-- Memory is single-session FIFO (no semantic extraction / cross-session personalization) — swap `router.memory` for mem0 if you need long-term memory
-- Generated skill quality is bounded by the underlying LLM — the ratchet catches regressions but isn't omniscient
+- Self-healing is bounded by the LLM's ability to read its own errors; the ratchet guarantees no regression, not guaranteed success
+- Rolling summaries need an LLM; without a key, memory degrades to plain FIFO
+- The test suite mocks all LLM calls (no CI token burn) — run `python cli.py` once manually before production

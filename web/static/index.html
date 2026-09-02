@@ -3,29 +3,62 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Synapse Agent</title>
+    <title>Synapse — Self-Evolving Agent</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <div class="container">
-        <header class="header">
-            <h1>Synapse Agent</h1>
-            <p class="subtitle">Intelligent Skill Routing</p>
-        </header>
-        <div class="chat-area" id="chatArea">
-            <div class="welcome-message">
-                <p>Hello! I'm Synapse, your intelligent routing agent. How can I help you today?</p>
+    <div class="layout">
+        <aside class="sidebar" id="sidebar">
+            <div class="brand">
+                <span class="brand-logo">🧠</span>
+                <div>
+                    <h1>Synapse</h1>
+                    <p class="tagline">self-evolving agent</p>
+                </div>
             </div>
-        </div>
-        <div class="input-area">
-            <input type="text" id="messageInput" placeholder="Type your message..." autocomplete="off">
-            <button id="sendBtn" title="Send">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <line x1="22" y1="2" x2="11" y2="13"></line>
-                    <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-                </svg>
-            </button>
-        </div>
+
+            <section class="panel">
+                <h2>Skills <span class="count" id="skillCount">0</span></h2>
+                <ul id="skillList" class="skill-list"></ul>
+            </section>
+
+            <section class="panel">
+                <h2>Skill health</h2>
+                <ul id="statsList" class="stats-list"><li class="dim">no data yet</li></ul>
+            </section>
+
+            <footer class="sidebar-foot">
+                <span class="dim" id="sessionId"></span>
+                <button id="clearBtn" class="ghost-btn" title="Clear this conversation's memory">Clear chat</button>
+            </footer>
+        </aside>
+
+        <main class="chat-column">
+            <header class="header">
+                <button id="menuBtn" class="ghost-btn" aria-label="Toggle sidebar">☰</button>
+                <div>
+                    <p class="subtitle">When the agent can't do something, it writes the code to learn it.</p>
+                </div>
+            </header>
+
+            <div class="chat-area" id="chatArea">
+                <div class="welcome-message">
+                    <p>👋 I'm <strong>Synapse</strong>. Ask me anything — I'll route it to a skill,
+                    or <em>write a new skill on the spot</em> if none fits.</p>
+                    <p class="dim">Try: “weather in Tokyo” · “(2+3)*4^2” · “AAPL stock price” ← triggers meta-evolution</p>
+                </div>
+            </div>
+
+            <div class="input-area">
+                <input type="text" id="messageInput" placeholder="Type your message..." autocomplete="off">
+                <button id="sendBtn" title="Send" aria-label="Send">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="22" y1="2" x2="11" y2="13"></line>
+                        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                    </svg>
+                </button>
+            </div>
+        </main>
     </div>
     <script src="/static/app.js"></script>
 </body>
