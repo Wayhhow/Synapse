@@ -5,7 +5,7 @@
 **自进化 AI Agent 框架 — 当 Agent 遇到不会的事，它会自己写代码学会**
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://python.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/Wayhhow/Synapse/actions/workflows/ci.yml/badge.svg)](https://github.com/Wayhhow/Synapse/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-141%20passing-brightgreen)](#测试)
 [![Agent Skills](https://img.shields.io/badge/SKILL.md-standard-8A2BE2)](https://agentskills.io)
@@ -340,7 +340,7 @@ CI 在 GitHub Actions 上跑 Ubuntu + Windows × Python 3.10–3.13 的完整矩
 
 **Synapse — 当 Agent 遇到不会的事，它自己写代码学会；写坏了，它自己修。**
 
-**Author**: Wayhhow · **License**: MIT
+**Author**: Wayhhow · **License**: Apache-2.0
 
 </div>
 
