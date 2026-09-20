@@ -2,15 +2,18 @@
 
 # 🧠 Synapse
 
-**自进化 AI Agent 框架 — 当 Agent 遇到不会的事，它会自己写代码学会**
+**自进化 AI Agent 框架 — 遇到不会的事，它自己写代码学会；写坏了，它自己修。**
 
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://python.org)
+*A self-evolving AI agent framework — when the agent can't do something, it writes the code to learn it.*
+
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://python.org)
 [![CI](https://github.com/Wayhhow/Synapse/actions/workflows/ci.yml/badge.svg)](https://github.com/Wayhhow/Synapse/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-141%20passing-brightgreen)](#测试)
+[![Ruff](https://img.shields.io/badge/lint-ruff-yellow?logo=ruff&logoColor=white)](https://docs.astral.sh/ruff/)
 [![Agent Skills](https://img.shields.io/badge/SKILL.md-standard-8A2BE2)](https://agentskills.io)
 
-[English](#english) · [快速开始](#快速开始) · [架构](#架构) · [配置](#配置) · [设计哲学](#设计哲学)
+[快速开始](#快速开始) · [架构](#架构) · [配置](#配置) · [路线图](#路线图) · [已知限制](#已知限制) · [English](#english)
 
 </div>
 
@@ -18,7 +21,31 @@
 
 > *"如果 Agent 遇到一个它不会的任务，它不应该说'我做不到'——它应该说'等我一下，我去学一下'。"*
 
-Synapse 是一个**自进化（Meta-Evolution）AI Agent 框架**。它以 ReAct 式 Agent 循环驱动：每一轮 LLM 可以调用技能（tool），执行结果回灌到上下文继续推理；当没有技能能处理请求时，Synapse 调用 LLM 现场生成新的 Python 技能文件、验证、加载并立即投入执行——**Agent 在运行时自己教自己新能力，坏了还会自己修**。
+Synapse 是一个**自进化（Meta-Evolution）AI Agent 框架**。它以 ReAct 式 Agent 循环驱动：每一轮 LLM 可以调用技能（tool），执行结果回灌到上下文继续推理；当没有技能能处理请求时，Synapse 调用 LLM **现场生成新的 Python 技能文件**、验证、加载并立即投入执行——**Agent 在运行时自己教自己新能力，坏了还会自己修**。
+
+- ⚡ **零额外 API Key**：内置技能（搜索 / 天气 / 新闻 / 翻译 / 计算 / 数据分析）开箱即用，只需一个 LLM Key
+- 🔓 **零供应商锁定**：任何 OpenAI 兼容端点（DeepSeek / Qwen / GLM / OpenRouter / Ollama）一行环境变量切换
+- 📦 **SKILL.md 标准导出**：技能可导出为 [Agent Skills 开放标准](https://agentskills.io)，被 Claude Code、Cursor 等生态工具直接识别
+- 🧪 **工程化质量**：141 个全 mock 测试（CI 零 token 消耗）、Ruff 强制 lint、Ubuntu/Windows × Python 3.10–3.13 CI 矩阵
+- 🚫 **诚实文档**：沙箱边界、自愈局限、[已知限制](#已知限制)全部明说，不夸大
+
+---
+
+## 为什么 Synapse 与众不同
+
+主流 Agent 框架（AutoGPT、LangChain Agents、OpenManus）把"技能"视为**静态资产**——功能边界在发布时就锁死了。Synapse 把它变成**动态资产**：
+
+| 场景 | 传统 Agent | Synapse |
+|------|-----------|---------|
+| 遇到没见过的任务 | ❌ "我做不到" | 🧬 现场生成技能，验证后立刻执行 |
+| 生成的代码有 bug | ❌ 当场失败 | 🔧 错误回灌 LLM 迭代修复（≤3 轮） |
+| 运行中技能崩了 | ❌ 每次调用都失败 | 🔧 连败 ≥3 次自动自愈，旧版归档兜底 |
+| 修复后更差了 | — | 🔒 棘轮评分拦截，质量只升不降 |
+| 想迁移技能 | 复制代码手动改 | 📦 一键导出 SKILL.md 标准格式 |
+
+这不是概念 demo——每条机制都有测试覆盖（见 `tests/test_skill_repair.py`、`test_meta_evolution.py` 等）。
+
+---
 
 ## 核心循环
 
@@ -41,6 +68,9 @@ flowchart LR
 ```
 
 与 v1 的"单发路由"不同，v2 的 Agent 循环（借鉴 [OpenManus](https://github.com/FoundationAgents/OpenManus) 的 ReAct 架构）意味着：LLM 看得到每次工具执行的真实结果，可以在一步里调用多个工具、组合信息、对失败做出反应，最后给出自然语言的最终回答。
+
+
+---
 
 ## 六大机制
 
@@ -87,19 +117,7 @@ flowchart LR
 
 每条查询一条 JSONL 记录（`data/traces.jsonl`）：每轮 LLM 耗时、每个技能执行成败、最终结局。`GET /traces` 直接读取最近记录，`tail -f` 即可实时观察 Agent 行为——本地版的 LangSmith。
 
-## 多 Provider 支持（v2 新增）
-
-任何 OpenAI 兼容端点开箱即用（借鉴 OpenManus 的 provider 无关设计）：
-
-```bash
-# DeepSeek
-SYNAPSE_LLM_BASE_URL=https://api.deepseek.com/v1
-SYNAPSE_MODEL=deepseek-chat
-
-# OpenRouter / Qwen / GLM / Ollama 本地模型 同理
-```
-
-LLM 调用内置两层韧性：OpenAI SDK 传输层重试 + 应用层指数退避重试（限流/超时/5xx）。
+---
 
 ## 快速开始
 
@@ -129,7 +147,7 @@ uvicorn web.app:app --reload       # Web UI（SSE 流式输出 + 技能面板 + 
 
 ### 4. 试试这些
 
-```
+```text
 > 北京天气怎么样？
 > 计算 (2 + 3) * 4 ** 2
 > 分析这组数据: 23, 45, 12, 67, 34, 89, 56
@@ -145,6 +163,24 @@ python cli.py --export ./my_skills
 ```
 
 每个技能导出为 [Agent Skills 开放标准](https://agentskills.io)（Anthropic 2025 年 10 月推出、2025 年 12 月开放标准化的 `SKILL.md` 格式）目录：`SKILL.md`（YAML frontmatter + 使用文档）+ `skill.py`（可执行源码）。Synapse 自动生成的技能可即刻被 Claude Code、Cursor、Codex CLI 等 20+ 生态工具识别。
+
+---
+
+## 多 Provider 支持（v2 新增）
+
+任何 OpenAI 兼容端点开箱即用（借鉴 OpenManus 的 provider 无关设计）：
+
+```bash
+# DeepSeek
+SYNAPSE_LLM_BASE_URL=https://api.deepseek.com/v1
+SYNAPSE_MODEL=deepseek-chat
+
+# OpenRouter / Qwen / GLM / Ollama 本地模型 同理
+```
+
+LLM 调用内置两层韧性：OpenAI SDK 传输层重试 + 应用层指数退避重试（限流/超时/5xx）。
+
+---
 
 ## 架构
 
@@ -195,6 +231,8 @@ graph TB
     style Router fill:#16213e,color:#fff
 ```
 
+---
+
 ## 内置技能
 
 所有技能**开箱即用**，无需额外 API Key（除 LLM 外）：
@@ -208,6 +246,8 @@ graph TB
 | 📰 **News** | Google News RSS | ❌ |
 | 🌤️ **Weather** | Open-Meteo 天气 + 地理编码 | ❌ |
 | 🧬 **Auto-Generated** | Meta-Evolution 运行时生成的技能 | 视情况 |
+
+---
 
 ## 配置
 
@@ -226,6 +266,8 @@ graph TB
 | `SYNAPSE_MEMORY_MAX_HISTORY` | `10` | 短期记忆轮数 |
 | `SYNAPSE_TRACE` | `1` | JSONL 追踪开关 |
 
+---
+
 ## Web API
 
 | 端点 | 说明 |
@@ -237,6 +279,8 @@ graph TB
 | `GET /traces` | 最近 N 条执行追踪 |
 | `GET /history/{id}` · `DELETE /history/{id}` | 会话记忆读取/清除 |
 | `GET /health` | 健康检查 |
+
+---
 
 ## 如何写一个新技能
 
@@ -279,6 +323,8 @@ class MySkill(BaseSkill):
             return MyResponse(result="", error=str(e))
 ```
 
+---
+
 ## 测试
 
 ```bash
@@ -288,6 +334,9 @@ ruff check .       # Lint（CI 强制）
 ```
 
 CI 在 GitHub Actions 上跑 Ubuntu + Windows × Python 3.10–3.13 的完整矩阵。
+
+
+---
 
 ## 设计哲学
 
@@ -314,6 +363,8 @@ CI 在 GitHub Actions 上跑 Ubuntu + Windows × Python 3.10–3.13 的完整矩
 | 滚动记忆摘要 | ✅ 内置 | ✅ | ✅ | ❌ |
 | 零额外 API Key | ✅ | ❌ | 视实现 | ❌ |
 
+---
+
 ## 已知限制
 
 诚实地列出当前的边界，方便使用者判断是否适合自己：
@@ -324,6 +375,31 @@ CI 在 GitHub Actions 上跑 Ubuntu + Windows × Python 3.10–3.13 的完整矩
 - **追踪是本地文件**：JSONL 适合单机调试，没有多租户/团队协作视图（那是 LangSmith/Langfuse 的领域）。
 - **Meta-Evolution 受限于底层 LLM**：弱模型可能生成语义错误的代码——棘轮 + 迭代修复兜底，但兜底不等于万能。
 - **测试聚焦单元/集成**：141 个测试全部 mock LLM（避免 CI 烧 token）；未包含真实 API 冒烟测试。生产部署前建议手动跑一次 `python cli.py` 验证真实链路。
+
+---
+
+## 路线图
+
+以下方向已在 [CONTRIBUTING.md](CONTRIBUTING.md) 中开放认领（规划方向，非承诺时间线）：
+
+- [ ] **容器级沙箱选项**：在进程沙箱之外提供 Docker/gVisor 后端，覆盖不可信多租户场景
+- [ ] **SKILL.md 导入**：读取标准技能目录（当前仅支持导出）
+- [ ] **评估维度扩展**：例如基于 lint 的结构评分
+- [ ] **更多内置技能**：模板契约见[如何写一个新技能](#如何写一个新技能)
+
+---
+
+## 贡献
+
+欢迎 PR！开发环境搭建、测试规范与"哪里可以帮忙"清单见 [CONTRIBUTING.md](CONTRIBUTING.md)。简要要求：
+
+- 测试保持 hermetic（mock LLM、零网络、零 token），新功能需要配置旋钮 + 测试 + CHANGELOG 条目
+- 安全关卡与棘轮机制是承重墙，相关改动请阅读 `CONTRIBUTING.md` 中的契约说明
+- 提交风格：`feat:` / `fix:` / `docs:` / `test:` / `refactor:` 短祈使句
+
+有问题？[开 Issue](https://github.com/Wayhhow/Synapse/issues)。
+
+---
 
 ## 致谢
 
@@ -336,11 +412,17 @@ CI 在 GitHub Actions 上跑 Ubuntu + Windows × Python 3.10–3.13 的完整矩
 
 ---
 
+## 许可证
+
+[Apache License 2.0](LICENSE) © Wayhhow
+
+---
+
 <div align="center">
 
 **Synapse — 当 Agent 遇到不会的事，它自己写代码学会；写坏了，它自己修。**
 
-**Author**: Wayhhow · **License**: Apache-2.0
+⭐ 如果这个项目对你有启发，欢迎 Star 支持。
 
 </div>
 
@@ -379,3 +461,4 @@ python cli.py --export ./skills    # export as SKILL.md-standard folders
 - Self-healing is bounded by the LLM's ability to read its own errors; the ratchet guarantees no regression, not guaranteed success
 - Rolling summaries need an LLM; without a key, memory degrades to plain FIFO
 - The test suite mocks all LLM calls (no CI token burn) — run `python cli.py` once manually before production
+
