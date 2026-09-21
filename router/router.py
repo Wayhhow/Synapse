@@ -61,6 +61,18 @@ class SkillRouter:
         # original constructor and used heavily by tests).
         self.api_key = api_key or self.config.api_key
         self.model_name = model_name or self.config.model
+
+        # Demo mode: swap in the deterministic mock LLM so anyone can try the
+        # agent loop with zero API key and zero cost (SYNAPSE_DEMO_MOCK_LLM=1
+        # or `python cli.py --demo`).
+        self._mock_llm = None
+        if self.config.demo_mock_llm:
+            from core.mock_llm import MockLLM
+            self._mock_llm = MockLLM()
+            self._mock_llm.patch()
+            if self.api_key is None:
+                self.api_key = "demo"  # OpenAI SDK requires a non-empty key
+            logger.info("Demo mode: mock LLM active (no real API calls).")
         self.skills: Dict[str, BaseSkill] = {}
         self._loaded_modules: Dict[str, Any] = {}
         self._discover_skills()
@@ -107,6 +119,10 @@ class SkillRouter:
 
         for skill_name, skill in self.skills.items():
             self.registry.register(skill_name, skill.description)
+
+        # Let the mock LLM route over the discovered skills (demo mode only).
+        if self._mock_llm is not None:
+            self._mock_llm.skills = self.skills
 
     @property
     def client(self) -> AsyncOpenAI:
@@ -388,6 +404,12 @@ class SkillRouter:
                                     f"Meta-Evolution failed to generate a valid skill for intent '{intent}'. "
                                     "Explain to the user what you tried and answer as best you can."
                                 )
+                                if self._mock_llm is not None:
+                                    tool_content += (
+                                        " (Demo mode: the mock LLM cannot write code, so skill "
+                                        "generation is intentionally stubbed. Configure OPENAI_API_KEY "
+                                        "for real Meta-Evolution.)"
+                                    )
                                 yield {"type": "meta", "status": "failed", "intent": intent}
                         messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": tool_content})
                         continue

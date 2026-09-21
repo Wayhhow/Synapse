@@ -119,7 +119,14 @@ async def main():
     parser.add_argument("--stats", action="store_true", help="Show the skill health report and exit")
     parser.add_argument("--export", metavar="DIR", nargs="?", const="exported_skills",
                         help="Export skills as SKILL.md-standard folders and exit")
+    parser.add_argument("--demo", action="store_true",
+                        help="Run with the built-in mock LLM — no API key needed, zero cost")
     args = parser.parse_args()
+
+    if args.demo:
+        # Same effect as SYNAPSE_DEMO_MOCK_LLM=1 (must be set before the
+        # SkillRouter below builds its SynapseConfig).
+        os.environ["SYNAPSE_DEMO_MOCK_LLM"] = "1"
 
     if args.skills or args.stats or args.export:
         router = SkillRouter()
@@ -138,6 +145,8 @@ async def main():
     # welcome message first, and the router's INFO logs (skill discovery, etc.)
     # appear below it rather than above.
     print(BANNER)
+    if args.demo:
+        print(f"{C_YELLOW}Demo mode: mock LLM active — no API key needed, zero token cost.{C_RESET}")
     print("Type your query, or /help for commands. 'exit' or Ctrl-D leaves.")
     router = SkillRouter()
     session_id = str(uuid.uuid4())

@@ -1,4 +1,4 @@
-<div align="center">
+﻿<div align="center">
 
 # 🧠 Synapse
 
@@ -9,7 +9,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://python.org)
 [![CI](https://github.com/Wayhhow/Synapse/actions/workflows/ci.yml/badge.svg)](https://github.com/Wayhhow/Synapse/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-141%20passing-brightgreen)](#测试)
+[![Tests](https://img.shields.io/badge/tests-149%20passing-brightgreen)](#测试)
 [![Ruff](https://img.shields.io/badge/lint-ruff-yellow?logo=ruff&logoColor=white)](https://docs.astral.sh/ruff/)
 [![Agent Skills](https://img.shields.io/badge/SKILL.md-standard-8A2BE2)](https://agentskills.io)
 
@@ -26,7 +26,7 @@ Synapse 是一个**自进化（Meta-Evolution）AI Agent 框架**。它以 ReAct
 - ⚡ **零额外 API Key**：内置技能（搜索 / 天气 / 新闻 / 翻译 / 计算 / 数据分析）开箱即用，只需一个 LLM Key
 - 🔓 **零供应商锁定**：任何 OpenAI 兼容端点（DeepSeek / Qwen / GLM / OpenRouter / Ollama）一行环境变量切换
 - 📦 **SKILL.md 标准导出**：技能可导出为 [Agent Skills 开放标准](https://agentskills.io)，被 Claude Code、Cursor 等生态工具直接识别
-- 🧪 **工程化质量**：141 个全 mock 测试（CI 零 token 消耗）、Ruff 强制 lint、Ubuntu/Windows × Python 3.10–3.13 CI 矩阵
+- 🧪 **工程化质量**：149 个全 mock 测试（CI 零 token 消耗）、Ruff 强制 lint、Ubuntu/Windows × Python 3.10–3.13 CI 矩阵
 - 🚫 **诚实文档**：沙箱边界、自愈局限、[已知限制](#已知限制)全部明说，不夸大
 
 ---
@@ -120,6 +120,17 @@ flowchart LR
 ---
 
 ## 快速开始
+
+### 0. 零成本试玩（无需 API Key）
+
+想先看看效果？一条命令进入演示模式——内置 Mock LLM 驱动完整的 ReAct 循环（路由 → 执行技能 → 结果回灌 → 回答），**不需要任何 API Key，不消耗任何 token**：
+
+```bash
+pip install -r requirements.txt
+python cli.py --demo
+```
+
+试试输入 `北京天气怎么样？`（真实调用天气技能）或一个生僻请求（观察 Meta-Evolution 被触发——演示模式下生成环节被诚实地跳过，配置 `OPENAI_API_KEY` 后即是完整真实链路）。演示模式也可通过环境变量 `SYNAPSE_DEMO_MOCK_LLM=1` 开启，对 Web UI 同样生效。
 
 ### 1. 安装
 
@@ -265,6 +276,7 @@ graph TB
 | `SYNAPSE_SANDBOX_TIMEOUT` | `10` | 沙箱超时（秒） |
 | `SYNAPSE_MEMORY_MAX_HISTORY` | `10` | 短期记忆轮数 |
 | `SYNAPSE_TRACE` | `1` | JSONL 追踪开关 |
+| `SYNAPSE_DEMO_MOCK_LLM` | `0` | 演示模式：内置 Mock LLM，零 Key 零成本 |
 
 ---
 
@@ -329,7 +341,7 @@ class MySkill(BaseSkill):
 
 ```bash
 pip install -r requirements.txt pytest pytest-asyncio
-pytest -q          # 141 个测试，覆盖 Agent 循环 / 自愈 / 棘轮 / 沙箱 / 记忆 / 追踪 / 导出
+pytest -q          # 149 个测试，覆盖 Agent 循环 / 自愈 / 棘轮 / 沙箱 / 记忆 / 追踪 / 导出
 ruff check .       # Lint（CI 强制）
 ```
 
@@ -374,7 +386,7 @@ CI 在 GitHub Actions 上跑 Ubuntu + Windows × Python 3.10–3.13 的完整矩
 - **滚动摘要是可选的**：需要 LLM 调用；无 Key 环境退化为纯 FIFO。摘要质量取决于模型能力，不保证无损。
 - **追踪是本地文件**：JSONL 适合单机调试，没有多租户/团队协作视图（那是 LangSmith/Langfuse 的领域）。
 - **Meta-Evolution 受限于底层 LLM**：弱模型可能生成语义错误的代码——棘轮 + 迭代修复兜底，但兜底不等于万能。
-- **测试聚焦单元/集成**：141 个测试全部 mock LLM（避免 CI 烧 token）；未包含真实 API 冒烟测试。生产部署前建议手动跑一次 `python cli.py` 验证真实链路。
+- **测试聚焦单元/集成**：149 个测试全部 mock LLM（避免 CI 烧 token）；未包含真实 API 冒烟测试。生产部署前建议手动跑一次 `python cli.py` 验证真实链路。
 
 ---
 
@@ -439,12 +451,15 @@ Synapse is a **self-evolving AI agent framework**. It runs a bounded ReAct-style
 ```bash
 pip install -r requirements.txt
 cp .env.example .env  # add OPENAI_API_KEY (optional: SYNAPSE_LLM_BASE_URL for DeepSeek/Qwen/GLM/Ollama/...)
-python cli.py                      # CLI with /skills /stats /export commands
-uvicorn web.app:app --reload       # Web UI: SSE streaming + skill panel
-python cli.py --export ./skills    # export as SKILL.md-standard folders
+python cli.py --demo                 # zero-cost demo: built-in mock LLM, NO API key needed
+python cli.py                        # CLI with /skills /stats /export commands
+uvicorn web.app:app --reload         # Web UI: SSE streaming + skill panel
+python cli.py --export ./skills      # export as SKILL.md-standard folders
 ```
 
 ### Key Features (v2)
+
+- 🎬 **Zero-cost demo mode** — `python cli.py --demo` runs the full agent loop with a built-in mock LLM: no API key, no token spend, honest Meta-Evolution stubbing
 
 - 🔁 **Agentic loop** — multi-step reasoning with tool-result feedback; multi-tool turns; `SYNAPSE_MAX_STEPS=1` restores legacy single-shot routing
 - 🧬 **Meta-Evolution** — runtime skill generation behind four gates (syntax, top-level safety, AST antipattern scan, dedup)
@@ -453,7 +468,7 @@ python cli.py --export ./skills    # export as SKILL.md-standard folders
 - 📡 **Any OpenAI-compatible provider** — DeepSeek/Qwen/GLM/OpenRouter/Ollama via `SYNAPSE_LLM_BASE_URL`, with two layers of retry resilience
 - 📈 **JSONL tracing** — one record per query (`/traces` endpoint included)
 - 📦 **SKILL.md export** — bridges every skill to the Agent Skills open standard (Claude Code, Cursor, Codex CLI, ...)
-- ✅ **141 tests** across agent loop, self-healing, ratchet, sandbox, memory, tracing and export; CI matrix (Ubuntu/Windows × Python 3.10–3.13) with ruff
+- ✅ **149 tests** across agent loop, self-healing, ratchet, sandbox, memory, tracing and export; CI matrix (Ubuntu/Windows × Python 3.10–3.13) with ruff
 
 ### Known Limitations
 

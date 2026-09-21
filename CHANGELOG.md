@@ -3,6 +3,24 @@
 All notable changes to Synapse are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning follows semver.
 
+## [2.1.0] - 2026-09-21
+
+### Added
+
+- **Zero-cost demo mode** (`core/mock_llm.py`): `python cli.py --demo` or
+  `SYNAPSE_DEMO_MOCK_LLM=1` swaps in a deterministic, keyword-routed mock LLM
+  that drives the full ReAct loop with **no API key and zero token spend**.
+  Routing runs over the live skill catalog; unmatched queries honestly
+  trigger the Meta-Evolution path with generation stubbed (writing code
+  needs a real LLM) and the failure fed back into the loop. Production
+  behaviour is untouched unless the flag is set.
+
+### Tests
+
+- Suite grew from 141 to 149 tests (8 new demo-mode tests covering keyword
+  routing, arg building, full-loop execution without a key, memory, honest
+  meta stubbing, and the SDK-not-patched safety invariant).
+
 ## [2.0.0] - 2026-09-02
 
 A major evolution of the framework, borrowing proven patterns from

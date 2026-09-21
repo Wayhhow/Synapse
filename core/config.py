@@ -78,6 +78,9 @@ class SynapseConfig:
     trace_enabled: bool = True
     trace_path: str = "data/traces.jsonl"
 
+    # --- Demo ---
+    demo_mock_llm: bool = False       # use the built-in mock LLM (zero API key, zero cost)
+
     @classmethod
     def from_env(cls) -> "SynapseConfig":
         load_env_file()
@@ -99,6 +102,7 @@ class SynapseConfig:
             auto_repair_threshold=_env_int("SYNAPSE_AUTO_REPAIR_THRESHOLD", 3),
             trace_enabled=_env_bool("SYNAPSE_TRACE", True),
             trace_path=os.getenv("SYNAPSE_TRACE_PATH", "data/traces.jsonl"),
+            demo_mock_llm=_env_bool("SYNAPSE_DEMO_MOCK_LLM", False),
         )
 
 
